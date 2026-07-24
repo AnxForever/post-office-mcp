@@ -16,7 +16,7 @@ from openpyxl.styles import Font, PatternFill, Border, Side
 
 
 
-HDR = ['序号', '测量日期', '场地', '邮路', '车号', '挂车号', '长(m)', '宽(m)', '高(m)', '测量容积(方)', '车型问题']
+HDR = ['序号', '邮路', '车号', '挂车号', '长（m）', '宽（m）', '高（m）', '测量容积（方）', '预报载重（吨）', '未装容积（米）', '车型问题']
 
 
 def extract(path, pat_str, month, src):
@@ -61,6 +61,10 @@ def extract(path, pat_str, month, src):
                 col['vol'] = c
             if ('车型问题' in h or h == '问题') and 'issue' not in col:
                 col['issue'] = c
+            if '预报载重' in h and 'forecast' not in col:
+                col['forecast'] = c
+            if ('未装容积' in h or h == '未装') and 'unused' not in col:
+                col['unused'] = c
         if 'plate' not in col:
             continue
         date_str = '2026-%02d-%02d' % (month, int(m.group(2)))
@@ -84,11 +88,11 @@ def extract(path, pat_str, month, src):
                     if lv and wv and hv: vol = float(lv) * float(wv) * float(hv)
                 except: pass
             records.append({
-                'date': date_str, 'src': src,
                 'route': gv('route'), 'plate': pl.upper(),
                 'trailer': gv('trailer'), 'len': gv('len'),
                 'wid': gv('wid'), 'hgt': gv('hgt'),
                 'vol': vol, 'issue': gv('issue'),
+                'forecast': gv('forecast'), 'unused': gv('unused'),
                 'cross_filled': False,
             })
     wb.close()
@@ -139,19 +143,19 @@ def main():
     seq = 1
     for r in ct + gw:
         ws.cell(seq + 1, 1, seq).border = B
-        ws.cell(seq + 1, 2, r['date']).border = B
-        ws.cell(seq + 1, 3, r['src']).border = B
-        ws.cell(seq + 1, 4, r['route']).border = B
-        ws.cell(seq + 1, 5, r['plate']).border = B
-        ws.cell(seq + 1, 6, r['trailer']).border = B
-        ws.cell(seq + 1, 7, r['len']).border = B
-        ws.cell(seq + 1, 8, r['wid']).border = B
-        ws.cell(seq + 1, 9, r['hgt']).border = B
-        ws.cell(seq + 1, 10, r['vol']).border = B
+        ws.cell(seq + 1, 2, r['route']).border = B
+        ws.cell(seq + 1, 3, r['plate']).border = B
+        ws.cell(seq + 1, 4, r['trailer']).border = B
+        ws.cell(seq + 1, 5, r['len']).border = B
+        ws.cell(seq + 1, 6, r['wid']).border = B
+        ws.cell(seq + 1, 7, r['hgt']).border = B
+        ws.cell(seq + 1, 8, r['vol']).border = B
+        ws.cell(seq + 1, 9, r['forecast']).border = B
+        ws.cell(seq + 1, 10, r['unused']).border = B
         ws.cell(seq + 1, 11, r['issue']).border = B
         seq += 1
 
-    for c, w in enumerate([6, 14, 8, 28, 12, 14, 8, 8, 8, 14, 24], 1):
+    for c, w in enumerate([6, 28, 12, 14, 12, 12, 12, 14, 12, 12, 20], 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = w
 
     F = os.path.join(OUT, '%d月_01_车型汇总表.xlsx' % M)
