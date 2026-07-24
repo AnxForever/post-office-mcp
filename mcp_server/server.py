@@ -60,7 +60,15 @@ def _run_script(script_name, args):
 # ============================================================
 try:
     from mcp.server.fastmcp import FastMCP
-    mcp = FastMCP("post-office-report-check")
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    mcp = FastMCP(
+        "post-office-report-check",
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["post-office-mcp.onrender.com", "localhost", "127.0.0.1"],
+        ),
+    )
 
     @mcp.tool()
     def build_summary(
@@ -187,17 +195,9 @@ try:
     elif "--http" in sys.argv:
         import uvicorn
         port = int(os.environ.get("PORT", 8000))
-        mcp_asgi = mcp.streamable_http_app()
-        # Wrapper: strip Host header to bypass Render proxy's unpredictable host
-        async def host_fix(scope, receive, send):
-            for h in scope.get("headers", []):
-                if h[0] == b"host":
-                    scope["headers"] = [(k, v) for k, v in scope["headers"] if k != b"host"]
-                    scope["headers"].append((b"host", b"localhost"))
-                    break
-            await mcp_asgi(scope, receive, send)
+        app = mcp.streamable_http_app()
         print(f"MCP Server starting on 0.0.0.0:{port} (streamable HTTP)")
-        uvicorn.run(host_fix, host="0.0.0.0", port=port)
+        uvicorn.run(app, host="0.0.0.0", port=port)
     else:
         print(f"MCP Server starting (stdio mode), scripts dir: {SCRIPTS_DIR}", file=sys.stderr)
         mcp.run()
