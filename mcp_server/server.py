@@ -178,7 +178,9 @@ try:
     # ============================================================
     if "--sse" in sys.argv:
         import uvicorn
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
         app = mcp.sse_app()
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
         port = int(os.environ.get("PORT", 8000))
         print(f"MCP Server starting on 0.0.0.0:{port} (SSE mode)")
         uvicorn.run(app, host="0.0.0.0", port=port)
