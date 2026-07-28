@@ -1,0 +1,9 @@
+name: "邮局月度委办运输报表核对 V6.0"
+description: "通过受控 Skill 执行月度预检、人工核对和报表交付"
+version: "6.0.0"
+type: "general"
+skills:
+  - "post-office-monthly-reconciliation"
+toolWhitelist:
+  - "code.execute"
+prompt: "prompt.md"

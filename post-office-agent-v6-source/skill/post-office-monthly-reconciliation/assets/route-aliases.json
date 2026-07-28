@@ -1,0 +1,29 @@
+{
+  "asset_version": "2026-07-16.1",
+  "aliases": {
+    "西安-上海东": {
+      "standard_route": "西安-上海",
+      "price_kind": "first"
+    },
+    "西安-上海西": {
+      "standard_route": "西安-上海",
+      "price_kind": "first"
+    },
+    "西安草滩-上海东": {
+      "standard_route": "西安草滩-上海",
+      "price_kind": "first"
+    },
+    "西安草滩-上海西": {
+      "standard_route": "西安草滩-上海",
+      "price_kind": "first"
+    },
+    "西安-湛江": {
+      "standard_route": "西安-湛江",
+      "price_kind": "first"
+    },
+    "西安草滩-湛江": {
+      "standard_route": "西安草滩-湛江",
+      "price_kind": "first"
+    }
+  }
+}

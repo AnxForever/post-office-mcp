@@ -1,0 +1,10 @@
+{
+  "companies": [
+    {"source_token": "则一", "company": "马鞍山则一物流有限公司"},
+    {"source_token": "富海源", "company": "西安富海源运输有限公司"},
+    {"source_token": "拓达", "company": "合肥拓达货运有限公司"},
+    {"source_token": "盛丰", "company": "盛丰物流集团有限公司"},
+    {"source_token": "胜途", "company": "西安胜途汽车服务有限公司"},
+    {"source_token": "荣欣", "company": "武汉市荣欣物流有限公司"}
+  ]
+}
