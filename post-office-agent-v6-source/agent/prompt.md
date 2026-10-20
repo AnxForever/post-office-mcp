@@ -15,17 +15,23 @@
 
 - 用户上传的文件都在 `/workspace`，输出统一写 `/workspace/output`。
 - 平台**没有** `/inputs` 和 `/outputs` 这两个目录，使用它们会直接报 PermissionError / FileNotFoundError。
-- **运行任何业务脚本前，先执行一次 `--phase list`**，拿到真实文件名再拼参数：
+- **运行任何业务脚本前，先执行一次 `--phase detect`**，让脚本按表结构判断每个文件是什么：
 
 ```python
 import runpy, sys
-sys.argv = ["agentos_entrypoint.py", "--phase", "list", "--workspace", "/workspace"]
+sys.argv = ["agentos_entrypoint.py", "--phase", "detect", "--task", "review",
+            "--month", "2026-04", "--workspace", "/workspace"]
 runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
-- 返回 JSON 的 `files[].path` 就是脚本参数要用的完整路径。
-- 下面示例里的 `草滩在线表.xlsx`、`8月基础报表原版.xlsx`、`一干委办盈亏.xlsx` **只是示意**，
-  必须替换成 `--phase list` 返回的真实文件名；不得照抄，也不得凭记忆拼写。
+- `--task` 取 `review` / `summary` / `profit`，与接下来要做的任务一致。
+- 返回的 `resolved` 是每个角色唯一命中的真实路径，直接拿来用。
+- 返回 `missing` 或 `ambiguous` 时，把 `files[].evidence` 和候选列表原样告诉用户，
+  请用户确认；**不要自己拼文件名，也不要照抄示例文件名**。
+- 需要看目录里还有哪些文件时，再执行 `--phase list`。
+
+`summary` 和 `profit` 阶段不传文件参数时会自动识别输入；`review` / `final` 阶段也只使用
+`--phase detect` 返回的路径，不得凭记忆拼写。
 
 ## 任务路由
 
@@ -37,13 +43,11 @@ runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 import runpy, sys
 sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
-    "build_model_summary.py",
-    "--caotan", "/workspace/草滩在线表.xlsx",
-    "--gangwu", "/workspace/港务在线表.xlsx",
-    "--output-dir", "/workspace/output",
+    "agentos_entrypoint.py", "--phase", "summary",
+    "--workspace", "/workspace",
     "--month", "2026-04",
 ]
-runpy.run_path("{skill_dir}/scripts/build_model_summary.py", run_name="__main__")
+runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
 该操作不创建完整月度运行状态，不能直接用于最终阶段。
@@ -89,9 +93,27 @@ runpy.run_path("{skill_dir}/scripts/run_workflow.py", run_name="__main__")
 ```
 
 如用户在收集文件阶段上传了上月盈亏表，必须将其路径传入：
-- `--previous-first-profit /workspace/一干委办盈亏.xlsx`
-- `--previous-second-profit /workspace/二干委办盈亏.xlsx`
+- `--previous-first-profit <detect 返回的一干盈亏路径>`
+- `--previous-second-profit <detect 返回的二干盈亏路径>`
 未上传则不传这两个参数，环比区自动留空。
+
+### 仅生成一干/二干盈亏表
+
+用户手上已有「基础报表原版」和当月「财务收入表」，只要两张盈亏表。运行：
+
+```python
+import runpy, sys
+sys.path.insert(0, "{skill_dir}/scripts")
+sys.argv = [
+    "agentos_entrypoint.py", "--phase", "profit",
+    "--workspace", "/workspace",
+    "--month", "2026-08",
+]
+runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
+```
+
+脚本按表结构自动识别这两份文件；识别不唯一时报错并列出候选，此时请用户确认，
+不要自己拼路径。该模式不读写 run-state，可与完整流程分开单独执行。
 
 ## 终端结果处理
 

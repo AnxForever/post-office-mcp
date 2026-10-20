@@ -1,13 +1,13 @@
 {
   "name": "post-office-monthly-reconciliation",
-  "version": "6.1.2",
+  "version": "6.2.0",
   "type": "bound",
   "description": "邮局月度委办运输报表预检、人工核对与最终交付",
   "scripts": {
     "agentos_entrypoint": {
       "file": "scripts/agentos_entrypoint.py",
       "language": "python",
-      "description": "统一入口：根据 --phase 路由到 summary/review/final 等阶段"
+      "description": "统一入口：根据 --phase 路由到 list/detect/summary/review/final 等阶段"
     },
     "build_model_summary": {
       "file": "scripts/build_model_summary.py",

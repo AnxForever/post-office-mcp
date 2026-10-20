@@ -20,26 +20,61 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 
 1. 使用用户明确给出的 `YYYY-MM` 作为目标月；未给出时先请用户确认。
 2. 将当次动态 Excel 文件全部列入 `code.execute.inputFiles`。
-3. **运行任何业务脚本前先执行 `--phase list`**，用返回的真实文件名替换示例文件名；
-   不要臆造文件名，也不要使用 `/inputs`、`/outputs`（平台没有这两个目录）。
+3. **运行任何业务脚本前，先执行 `--phase detect`**，确认每个文件被识别成什么角色。
+   识别依据是表结构，不是文件名；返回 `ambiguous` 或 `missing` 时停下来问用户，
+   不要自己猜文件名，也不要用 `/inputs`、`/outputs`（平台没有这两个目录）。
 4. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
 5. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
 6. 如脚本返回 `ok:false`，原样汇报 `errors` 和 `next_action`，不绕过阻断。
 7. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
 
-## 第 0 步：列目录确认文件名
+## 第 0 步：识别文件角色
 
-任何业务脚本之前，先跑一次：
+任何业务脚本之前，先跑一次预检：
 
 ```python
 import runpy, sys
 sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
-sys.argv = ["agentos_entrypoint.py", "--phase", "list", "--workspace", "/workspace"]
+sys.argv = ["agentos_entrypoint.py", "--phase", "detect", "--task", "review",
+            "--month", "2026-04", "--workspace", "/workspace"]
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
-返回 JSON 的 `files[].path` 就是后续参数要用的真实路径。
-下面的示例文件名只是示意，必须替换成这里列出的真实名字。
+`--task` 取 `review`（完整月报）、`summary`（只要车型汇总表）或 `profit`（只要盈亏表）。
+
+脚本按**表结构**判断每个文件是什么，不看文件名：
+
+| 识别结果 | 判断依据 |
+|---|---|
+| 基础报表原版 | 含 Sheet `一干汇总` 或 `二干基础` |
+| 财务收入表 | 表头含 `邮路名称` + `结算收入` + `普服收入`（客户可能叫「运输局表」） |
+| 草滩在线表 | 日 Sheet 命名为 `8月1日` 格式 |
+| 港务在线表 | 日 Sheet 命名为 `8.1` 格式 |
+| 车管基础数据 | 表头含 `邮路名称` + `邮路执行日期` + `派车单号` + `邮运量` |
+| 一干/二干价格表 | 表头含 `路线/路向` + `公里` + 吨位/系数，且表内标题或文件名标注一干/二干 |
+| 一干/二干盈亏模板 | 含 7 列盈亏子表头，且表内标题或文件名标注一干/二干 |
+| 基础报表初版模板 | 21 列表头完全匹配 |
+
+返回字段的用法：
+
+- `resolved`：每个角色唯一命中的文件路径，可直接作为脚本参数。
+- `files[].evidence`：为什么判成这个角色，向用户解释时引用它。
+- `confidence`：`low` 表示月份对不上或站点无法区分，汇报时要说明。
+- `missing` / `ambiguous`：缺文件或多候选，**停下问用户**，不要自行挑选。
+
+需要看目录里还有哪些文件时，再执行 `--phase list`：
+
+```python
+sys.argv = ["agentos_entrypoint.py", "--phase", "list", "--workspace", "/workspace"]
+```
+
+### 识别不出来的情况
+
+- **一干/二干价格表、盈亏模板**：两者结构相同，可靠信号只有表内标题或文件名里的「一干/二干」。
+  都没有时脚本返回 `price_candidate` / `profit_candidate` 并标 `low`，此时必须问用户，
+  不能按档位名猜（一干 2025 版模板也有 8 吨档，二干 2026 版价格表也有 40B 档）。
+- **草滩/港务在线表**：只按日 Sheet 命名区分。若两份表用同一种命名，脚本返回 `low`，
+  汇报时要求用户确认哪个是草滩、哪个是港务。
 
 ## 仅生成车型汇总表
 
@@ -49,14 +84,15 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/age
 import runpy, sys
 sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
 sys.argv = [
-    "build_model_summary.py",
-    "--caotan", "/workspace/草滩在线表.xlsx",
-    "--gangwu", "/workspace/港务在线表.xlsx",
-    "--output-dir", "/workspace/output",
+    "agentos_entrypoint.py", "--phase", "summary",
+    "--workspace", "/workspace",
     "--month", "2026-04",
 ]
-runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/build_model_summary.py", run_name="__main__")
+runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
+
+未传 `--caotan` / `--gangwu` 时，脚本按日 Sheet 命名自动识别；识别不唯一会直接报错并列出候选。
+只有 `--phase detect --task summary` 已经给出两个明确路径时，才用 `--caotan/--gangwu` 显式传入。
 
 该模式不建立月度运行状态，不能直接进入最终阶段。
 
@@ -138,16 +174,18 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run
 import runpy, sys
 sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
 sys.argv = [
-    "build_profit_tables.py",
-    "--base", "/workspace/8月基础报表原版.xlsx",
-    "--finance", "/workspace/2026.08运输局.xlsx",
+    "agentos_entrypoint.py", "--phase", "profit",
+    "--workspace", "/workspace",
     "--month", "2026-08",
-    "--out", "/workspace/output",
 ]
-runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/build_profit_tables.py", run_name="__main__")
+runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
-> `--finance` 传的是**财务收入表**。客户有时把它命名为 `2026.08运输局.xlsx`，
+未传 `--base-file` / `--finance-file` 时，脚本按表结构自动识别：含 `一干汇总`/`二干基础`
+的是基础报表原版，表头含 `结算收入` + `普服收入` 的是财务收入表。识别不唯一会报错并列出
+`detected`、`missing`、`ambiguous`，此时再让用户确认，**不要让模型自己拼文件名**。
+
+> 财务收入表就是「运输局表」。客户有时把它命名为 `2026.08运输局.xlsx`，
 > 有时叫 `2026.03财务收入表.xlsx`，两者是同一张表（31 列、Sheet 名 `sheet1`），按内容识别即可。
 
 该脚本的口径（详见 [reconciliation-rules.md](references/reconciliation-rules.md) 的「盈亏表」一节）：

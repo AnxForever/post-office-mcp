@@ -21,23 +21,37 @@
 
 ## 二、输入文件（含客户别名）
 
-`inspect_inputs.py` 按**表结构**识别角色，不只看文件名。下表列出客户常见的叫法：
+`--phase detect`（`scripts/reconciliation/detect.py`）按**表结构**识别文件角色，不看文件名。
+文件名只在结构无法区分时作兜底。
 
-| 角色 | 客户常见文件名 | 必需字段 |
+| 角色 | 客户常见文件名 | 识别依据（表结构） |
 |---|---|---|
-| 草滩在线测量表 | `草滩在线表.xlsx` | 日 Sheet（如 `8月1日`）、邮路、车牌、挂车、长宽高、容积 |
-| 港务在线测量表 | `港务在线表.xlsx` | 日 Sheet（如 `8.1`）、同上 |
-| 车管基础数据 | 6 家公司各一个 xlsx | 邮路名称、执行日期、派车单号、车牌、挂车、邮运量、结算吨位 |
-| **财务收入表** | **`2026.08运输局.xlsx`** / `2026.03财务收入表.xlsx` | 邮路级别、自委办、往返、邮路名称、流水号、结算收入、普服收入 |
-| 一干价格表 | `2024年10月新一干价格表(1).xlsx` | 路线、公里、吨位、容积下限、系数、标准价 |
-| 二干价格表 | `二干运费价.xlsx` | 同上 |
-| 基础报表初版模板 | `基础报表初版模板.xlsx` | 21 列表头（缺省时用内置 `assets/draft-template.xlsx`） |
-| 一干委办盈亏模板 | `一干委办盈亏.xlsx` | 月份页、7 列吨位分组、路线与合计行 |
-| 二干委办盈亏模板 | `二干委办盈亏.xlsx` | 同上 |
+| 草滩在线测量表 | `草滩在线表.xlsx` | 日 Sheet 命名为 `8月1日`；邮路、车牌、挂车、长宽高、容积 |
+| 港务在线测量表 | `港务在线表.xlsx` | 日 Sheet 命名为 `8.1`；字段同上 |
+| 车管基础数据 | 6 家公司各一个 xlsx | 邮路名称、邮路执行日期、派车单号、车牌、挂车、邮运量、结算吨位 |
+| **财务收入表** | **`2026.08运输局.xlsx`** / `2026.03财务收入表.xlsx` | 表头含 邮路名称 + 结算收入 + 普服收入 |
+| 一干价格表 | `2024年10月新一干价格表(1).xlsx` | 表头含 路线/路向 + 公里 + 吨位/系数；表内标题或文件名标注「一干」 |
+| 二干价格表 | `二干运费价.xlsx` | 同上，标注「二干」 |
+| 基础报表原版 | `8月基础报表原版.xlsx` | 含 Sheet `一干汇总` 或 `二干基础` |
+| 基础报表初版模板 | `基础报表初版模板.xlsx` | 21 列表头完全匹配（缺省时用内置 `assets/draft-template.xlsx`） |
+| 一干委办盈亏模板 | `一干委办盈亏.xlsx` | 含 7 列吨位分组子表头；标题或文件名标注「一干」 |
+| 二干委办盈亏模板 | `二干委办盈亏.xlsx` | 同上，标注「二干」 |
 
 > **财务收入表就是「运输局表」。** 客户有时把它命名为 `2026.08运输局.xlsx`，
 > 有时叫 `2026.03财务收入表.xlsx`，两种情况都是同一张表：31 列、Sheet 名 `sheet1`，
 > 字段完全一致。后文统一称**财务收入表**。
+
+### 识别不出来时的处理
+
+| 情况 | 脚本行为 | 处理方式 |
+|---|---|---|
+| 价格表/盈亏模板的表内标题和文件名都没有一干/二干 | 返回 `price_candidate` / `profit_candidate`，置信度 `low` | 停下问用户，不按档位名猜 |
+| 草滩/港务日 Sheet 命名方式相同 | 保留一个角色，置信度 `low` | 汇报时请用户确认站点 |
+| 文件月份与目标月不一致 | 角色保留，置信度 `low` | 正常流程会跳过；盈亏表流程会提示 |
+| 缺角色 / 同角色多文件 | `missing` / `ambiguous` | 停下问用户，不自行挑选 |
+
+档位名不能用来区分一干/二干：一干 2025 版模板有 `7.5米 45方 8吨` 档，
+二干 2026 版价格表有 `40吨B` 档。唯一可靠的线索是表内标题或文件名里的「一干/二干」。
 
 ---
 
@@ -81,9 +95,13 @@
 ```bash
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
+python scripts/agentos_entrypoint.py --phase detect --task review --workspace <工作区> --month 2026-08
 python scripts/run_workflow.py --phase review --workspace <工作区> --month 2026-08 \
     --bundle-root <skill 根目录>
 ```
+
+先跑 `detect`，确认 `resolved` 里 9 类文件都唯一命中；出现 `missing` / `ambiguous` 时先问用户，
+不要直接跑 `review`。
 
 产出：
 
@@ -127,10 +145,28 @@ python scripts/run_workflow.py --phase final --workspace <同一工作区> \
 
 ### 执行
 
+推荐走统一入口，不传文件名，由脚本按表结构自动识别：
+
+```bash
+python scripts/agentos_entrypoint.py --phase profit \
+    --workspace <工作区> --month 2026-08
+```
+
+需要显式指定时（例如工作区里有多份同角色文件）：
+
+```bash
+python scripts/agentos_entrypoint.py --phase profit \
+    --base-file <基础报表原版> \
+    --finance-file <财务收入表> \
+    --workspace <工作区> --month 2026-08
+```
+
+也可以直接调用底层脚本：
+
 ```bash
 python scripts/build_profit_tables.py \
-    --base    8月基础报表原版.xlsx \
-    --finance 2026.08运输局.xlsx \
+    --base    <基础报表原版> \
+    --finance <财务收入表> \
     --month   2026-08 \
     --out     <输出目录>
 ```
@@ -315,16 +351,19 @@ python scripts/build_profit_tables.py \
 
 ```
 agentos_entrypoint.py --phase <X>
-   ├─ list      → 列出工作区文件（确认真实文件名，必须在所有业务脚本之前跑）
-   ├─ summary   → build_model_summary.py      （只要车型汇总表）
+   ├─ list      → 列出工作区文件（只看文件名，不判断角色）
+   ├─ detect    → 按表结构识别每个文件是什么，返回 resolved/missing/ambiguous
+   ├─ summary   → build_model_summary.py      （只要车型汇总表；可自动识别两份在线表）
    ├─ review    → run_workflow.py --phase review
    ├─ final     → run_workflow.py --phase final
-   ├─ profit    → build_profit_tables.py      （只要盈亏表，两份源文件）
-   ├─ inspect   → inspect_inputs.py           （按结构识别输入角色）
+   ├─ profit    → build_profit_tables.py      （只要盈亏表；可自动识别两份源文件）
+   ├─ inspect   → inspect_inputs.py           （预检并写 run-state.json）
    ├─ runtime   → check_runtime.py            （环境自检）
-   └─ validate  → validate_outputs.py         （校验已有输出）
+   └─ validate  → validate_outputs.py         （校验已有输出，--stage review|final）
 ```
 
+`detect` 必须最先跑，`--task` 取 `review` / `summary` / `profit`。
+`inspect` 内部复用同一套结构识别，不再按文件名判断草滩/港务。
 `profit` 阶段不需要 `run-state.json`，可与完整流程分开、单独重复执行。
 
 ---
@@ -350,6 +389,11 @@ agentos_entrypoint.py --phase <X>
 | `reconciliation/templates.py` | 列数被 `max_column` 撑开 | `layout_max_column` 截断到 21 列；补蓝标 `BBD7EE` |
 | `inspect_inputs.py` | `integrity.py` 要求 `draft_template` 角色，预检却不产出 | 未上传初版模板时，用内置 `assets/draft-template.xlsx` 补齐该角色 |
 | `build_profit_tables.py` | 路径写错时只抛 FileNotFoundError / PermissionError | 输入校验 + 输出目录回退 |
+| `reconciliation/excel_io.py` | 一干/二干价格表、盈亏模板按文件名 `_paired_role` 判断，改名就失效 | 先看表内标题（`_pair_feature`），再看文件名，判不出返回 `candidate` 交人工确认 |
+| `reconciliation/excel_io.py` | 草滩/港务按文件名判断 | 改看日 Sheet 命名（`8月1日` vs `8.1`），文件名仅兜底 |
+| `reconciliation/excel_io.py` | 初版模板被 `_price_header` 误判成价格表 | 21 列表头先于价格表判断；价格表禁止出现车牌/派车单号列 |
+| `agentos_entrypoint.py` | `inspect` 传 `--workspace`，脚本要 `--input-dir/--workspace-dir`；`validate` 同理 | 按脚本真实参数转发，`validate` 增加 `--stage` |
+| `agentos_entrypoint.py` | `profit` / `summary` 未传文件就报缺参数 | 先按结构自动识别，唯一命中才继续，否则列出候选 |
 
 回归基线（4 月数据，`run_workflow --phase review`）：
 `model_rows=3224`、`model_summary_matched=3921`、`model_summary_unmatched=388`、`price_matched=3628`。

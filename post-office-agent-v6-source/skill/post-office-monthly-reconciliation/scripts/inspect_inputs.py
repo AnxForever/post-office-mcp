@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from reconciliation.detect import refine_profiles
 from reconciliation.excel_io import (
     classify_workbook,
     discover_workbooks,
@@ -29,6 +30,8 @@ ROLE_LABELS = {
     "second_price": "二干价格表",
     "first_profit_template": "一干委办盈亏模板",
     "second_profit_template": "二干委办盈亏模板",
+    "price_candidate": "价格表（一干/二干待定）",
+    "profit_candidate": "盈亏模板（一干/二干待定）",
 }
 REQUIRED_ROLES = {
     "online_caotan": 1,
@@ -40,7 +43,7 @@ REQUIRED_ROLES = {
     "first_profit_template": 1,
     "second_profit_template": 1,
 }
-PACKAGE_VERSION = "6.0.0"
+PACKAGE_VERSION = "6.2.0"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:
@@ -106,15 +109,28 @@ def inspect_inputs(
     explicit = _parse_explicit_month(month)
     files = discover_workbooks(input_dir)
     profiles = [classify_workbook(path) for path in files]
+    # 用结构识别细化角色：草滩/港务看日 Sheet 命名，价格表/盈亏模板看表内标题。
+    # 细化结果写回 profile，后续所有读取都基于这个角色。
+    detected = refine_profiles(profiles, explicit)
+    for item in detected:
+        if item.profile is not None and item.role != item.profile.role:
+            item.profile.role = item.role
+            item.profile.site = (
+                "港务" if item.role == "online_gangwu"
+                else "草滩" if item.role == "online_caotan" else None
+            )
     fatal: list[str] = []
     warnings: list[str] = []
 
     damaged = [profile.path.name for profile in profiles if profile.role == "damaged"]
-    unknown = [profile.path.name for profile in profiles if profile.role == "unknown"]
+    unknown = [profile.path.name for profile in profiles if profile.role in {"unknown", "price_candidate", "profit_candidate"}]
     if damaged:
         fatal.append(f"工作簿损坏或无法读取: {', '.join(damaged)}")
     if unknown:
         warnings.append(f"未识别且未参与核对的工作簿: {', '.join(unknown)}")
+    for item in detected:
+        if item.confidence == "low" and item.role in {"online_caotan", "online_gangwu"}:
+            warnings.append(f"在线表站点无法从内容确认，请人工复核: {item.path.name}")
 
     by_role: dict[str, list[Any]] = {}
     for profile in profiles:
@@ -149,9 +165,9 @@ def inspect_inputs(
     if vehicle_paths and company_map is not None:
         fatal.extend(validate_vehicle_sources(vehicle_paths, company_map))
 
-    for profile in active_profiles["online_caotan"]:
-        if "草滩" not in profile.path.name:
-            fatal.append(f"无法可靠区分草滩/港务在线表，无法继续预检: {profile.path.name}")
+    # 草滩/港务已按日 Sheet 命名（草滩「8月1日」/ 港务「8.1」）识别，
+    # 不再依据文件名。无法区分时 refine_profiles 会把置信度标为 low，
+    # 上面已经转成警告，由人工复核。
 
     observed: list[tuple[int | None, int, str]] = []
     online_profiles: list[Any] = []

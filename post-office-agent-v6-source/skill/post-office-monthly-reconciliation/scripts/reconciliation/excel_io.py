@@ -59,6 +59,10 @@ FINANCE_FIELDS = {
 PRICE_ROUTE_HEADERS = {"邮路名称", "路向"}
 PRICE_BLANK_ROUTE_RUN = 10
 PROFIT_GROUP_HEADERS = ["趟次(趟)", "装载量(袋件)", "每车平均装载量(袋件)", "运费（元）", "结算收入（元）", "盈亏值（元）", "平均每车盈亏（元）"]
+
+# 在线测量表的两种日 Sheet 命名：草滩「8月1日」，港务「8.1」。
+DAILY_CAOTAN_SHEET = re.compile(r"^\d+月\d+日$")
+DAILY_GANGWU_SHEET = re.compile(r"^\d+\.\d+$")
 REVIEW_HEADERS = [
     "序号", "车辆承运单位", "派车单号", "邮路名称", "路单编号", "封车时间", None, "车牌号", None, "容间",
     "吨位", "公里", "运输量", "路单号", "运价", "标准价", "备注", "是否跨档", "变动前容间", "变动前时间", "系数",
@@ -156,7 +160,34 @@ def _sheet_months(sheet_names: Iterable[str]) -> list[tuple[int | None, int]]:
     return result
 
 
-def _paired_role(path: Path, first_role: str, second_role: str) -> str | None:
+def _pair_feature(ws) -> str | None:
+    """用表内标题判断一干/二干。
+
+    档位名不能用来区分：一干 2025 版模板也有「7.5米 45方 8吨」档，
+    二干 2026 版价格表也有 40B 档。标题里的「一干 / 二干」才是可靠信号。
+    """
+    texts: list[str] = []
+    for values in ws.iter_rows(min_row=1, max_row=3, values_only=True):
+        for value in values:
+            text = normalize_text(value)
+            if text:
+                texts.append(text)
+    joined = " ".join(texts)
+    has_first = "一干" in joined
+    has_second = "二干" in joined
+    if has_first and not has_second:
+        return "first"
+    if has_second and not has_first:
+        return "second"
+    return None
+
+
+def _paired_role(path: Path, first_role: str, second_role: str, feature: str | None = None) -> str | None:
+    """先按内容特征判断，判不出来再看文件名；都没有则返回 None，交给调用方报歧义。"""
+    if feature == "first":
+        return first_role
+    if feature == "second":
+        return second_role
     filename = normalize_text(path.name).casefold()
     has_first = "一干" in filename or "first" in filename
     has_second = "二干" in filename or "second" in filename
@@ -169,6 +200,7 @@ def _price_header(ws) -> tuple[int | None, dict[str, int]]:
     route_column = distance_column = None
     header_row = None
     has_tier_or_coefficient = False
+    has_vehicle_columns = False
     for row, values in enumerate(ws.iter_rows(min_row=1, max_row=30, values_only=True), 1):
         for column, value in enumerate(values, 1):
             text = normalize_text(value)
@@ -178,7 +210,10 @@ def _price_header(ws) -> tuple[int | None, dict[str, int]]:
                 distance_column = column
             if "系数" in text or "吨" in text:
                 has_tier_or_coefficient = True
-    if route_column and distance_column and has_tier_or_coefficient:
+            if text in {"车牌号", "车号", "派车单号", "封车时间", "运单号"}:
+                has_vehicle_columns = True
+    # 价格表是按路线报价，不出现单车字段；出现说明是报表，不是价格表。
+    if route_column and distance_column and has_tier_or_coefficient and not has_vehicle_columns:
         return header_row, {"route": route_column, "distance": distance_column}
     return None, {}
 
@@ -237,31 +272,45 @@ def classify_workbook(path: Path | str) -> FileProfile:
             row, fields = _try_header(ws, model_required)
             if row:
                 lowered = normalize_text(path.name).lower()
-                daily_sheets = sum(1 for name in wb.sheetnames if parse_month_token(name))
-                if "车型" in lowered and "在线" not in lowered:
+                daily_caotan = sum(1 for name in wb.sheetnames if DAILY_CAOTAN_SHEET.match(normalize_text(name)))
+                daily_gangwu = sum(1 for name in wb.sheetnames if DAILY_GANGWU_SHEET.match(normalize_text(name)))
+                # 先看日 Sheet 命名：草滩「8月1日」，港务「8.1」。
+                # 文件名只在日 Sheet 无法区分时兜底。
+                if daily_gangwu > daily_caotan:
+                    role = "online_gangwu"
+                elif daily_caotan > daily_gangwu:
+                    role = "online_caotan"
+                elif "车型" in lowered and "在线" not in lowered:
                     role = "model"
                 elif "港务" in lowered:
                     role = "online_gangwu"
-                elif "草滩" in lowered or "在线" in lowered or daily_sheets >= 2:
+                elif "草滩" in lowered or "在线" in lowered:
+                    role = "online_caotan"
+                elif daily_caotan + daily_gangwu:
                     role = "online_caotan"
                 else:
                     role = "model"
                 profile.role, profile.header_row, profile.field_map = role, row, fields
                 profile.site = "港务" if role == "online_gangwu" else ("草滩" if role == "online_caotan" else None)
                 return profile
-            row, fields = _price_header(ws)
-            price_role = _paired_role(path, "first_price", "second_price")
-            if row and price_role:
-                profile.role, profile.header_row, profile.field_map = price_role, row, fields
-                return profile
-            row = _profit_group_header(ws)
-            profit_role = _paired_role(path, "first_profit_template", "second_profit_template")
-            if row and profit_role:
-                profile.role, profile.header_row, profile.field_map = profit_role, row, {"profit_group": 2}
-                return profile
+            # 初版模板（21 列）要在价格表之前判断：它同样含 邮路名称/公里/吨位/系数。
             row, fields = _review_header(ws)
             if row:
                 profile.role, profile.header_row, profile.field_map = "draft_template", row, fields
+                return profile
+            row, fields = _price_header(ws)
+            if row:
+                price_role = _paired_role(path, "first_price", "second_price", _pair_feature(ws))
+                profile.role = price_role or "price_candidate"
+                profile.header_row, profile.field_map = row, fields
+                return profile
+            row = _profit_group_header(ws)
+            if row:
+                profit_role = _paired_role(
+                    path, "first_profit_template", "second_profit_template", _pair_feature(ws)
+                )
+                profile.role = profit_role or "profit_candidate"
+                profile.header_row, profile.field_map = row, {"profit_group": 2}
                 return profile
     finally:
         wb.close()

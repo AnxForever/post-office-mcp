@@ -12,8 +12,12 @@ SKILL_NAME = "post-office-monthly-reconciliation"
 SKILL_ROOT = ROOT / "skill" / SKILL_NAME
 AGENT_ROOT = ROOT / "agent"
 DIST = ROOT.parent
+MANIFEST = json.loads((SKILL_ROOT / "manifest.json").read_text(encoding="utf-8"))
+VERSION = MANIFEST["version"]
+# 包名跟 manifest 版本同步，避免文件名和实际版本漂移
+MAJOR_MINOR = ".".join(VERSION.split(".")[:2])
 SKILL_ZIP = DIST / "post-office-monthly-reconciliation-skill.zip"
-AGENT_ZIP = DIST / "邮局委办运输报表核对V6.0-agent.zip"
+AGENT_ZIP = DIST / f"邮局委办运输报表核对V{MAJOR_MINOR}-agent.zip"
 FIXED_ZIP_TIME = (2026, 7, 28, 0, 0, 0)
 
 
@@ -53,10 +57,10 @@ def build_agent_json(files: list[Path]) -> dict[str, object]:
         "format": "agentos-v1",
         "exportedAt": int(time.time() * 1000),
         "agent": {
-            "name": "邮局月度委办运输报表核对 V6.0",
+            "name": f"邮局月度委办运输报表核对 V{MAJOR_MINOR}",
             "description": "通过受控 Skill 执行月度预检、人工核对和报表交付：车型汇总表 → 基础报表初版 → 人工闸门 → 拆分版 → 盈亏表",
             "icon": "[PO]",
-            "version": "6.1.2",
+            "version": "6.2.0",
             "category": "财务分析",
             "type": "general",
             "skills": [SKILL_NAME],
