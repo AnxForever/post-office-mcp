@@ -394,6 +394,43 @@ agentos_entrypoint.py --phase <X>
 | `reconciliation/excel_io.py` | 初版模板被 `_price_header` 误判成价格表 | 21 列表头先于价格表判断；价格表禁止出现车牌/派车单号列 |
 | `agentos_entrypoint.py` | `inspect` 传 `--workspace`，脚本要 `--input-dir/--workspace-dir`；`validate` 同理 | 按脚本真实参数转发，`validate` 增加 `--stage` |
 | `agentos_entrypoint.py` | `profit` / `summary` 未传文件就报缺参数 | 先按结构自动识别，唯一命中才继续，否则列出候选 |
+| `reconciliation/template_discovery.py` | 只读工作表上逐格 `ws.cell()`，每次都重新解析 XML | 改成单次 `iter_rows` 读成二维表 |
+| `reconciliation/xml_compat.py` | openpyxl 自动选用 lxml 后端，读大工作簿偶发 0xC0000005 | import openpyxl 前设 `OPENPYXL_LXML=False`，走标准库后端 |
+
+### 已知未解决：Windows 上的原生崩溃
+
+读取较大的工作簿（100 Sheet 的基础报表原版、17MB 的财务收入表）时，
+进程偶发以 `0xC0000005`（access violation）退出。崩溃点每次都不同，
+但都落在 XML 解析或 openpyxl 的 `serialisable.__eq__` 里。
+
+已确认的事实：
+
+- 与业务代码无关：`load_workbook(...)` + 遍历所有 Sheet 就能复现。
+- 单独读任何一个工作簿都不崩（各 25—30 次 0 失败），
+  只有在**同一进程里反复开关多个工作簿**时才偶发。
+- 关闭 lxml 后端能降低概率，但没有消除。
+
+统计（同一台机器，同一组文件）：
+
+| 配置 | 崩溃率 |
+|---|---|
+| lxml 后端 | 7 / 40 |
+| 标准库后端 | 0 / 40 |
+| 完整 `--phase final`（标准库后端） | 10 / 20 |
+
+`xml_compat.py` 关掉 lxml 后，完整流程崩溃率从约 25% 降到约 10%—50%（波动很大），
+**这不算修好**。根因在 CPython 3.12 + lxml 6.0.0 的原生层，业务代码无法根治。
+
+AgentOS 里入口是通过 `runpy` 在宿主进程内执行的，原生崩溃会连带杀掉宿主。
+缓解措施：
+
+- `agentos_entrypoint.py` 支持 `POST_OFFICE_HARD_EXIT=1`，让 CLI 运行跳过解释器收尾；
+  默认不开启，避免 `runpy` 场景误杀宿主。
+- 测试脚本遇到原生崩溃会自动重跑一次，并打印 `[WARN]`。
+- 交付前建议在目标机器上把 `--phase final` 连跑 3 次，全过再交付。
+
+彻底解决需要换环境：改用不含 lxml 的干净 Python 环境，
+或升级到已修复该问题的 CPython 小版本。这件事要单独验证，不能靠改业务代码绕过。
 
 回归基线（4 月数据，`run_workflow --phase review`）：
 `model_rows=3224`、`model_summary_matched=3921`、`model_summary_unmatched=388`、`price_matched=3628`。
@@ -401,7 +438,33 @@ agentos_entrypoint.py --phase <X>
 
 ---
 
-## 十、打包
+## 十、测试
+
+```bash
+python post-office-agent-v6-source/tests/test_skill.py
+python post-office-agent-v6-source/tests/test_skill.py --fast   # 跳过完整 review/final
+```
+
+覆盖：
+
+| 用例 | 验证点 |
+|---|---|
+| detect review/summary/profit | 4 月数据包 9 类角色全部唯一命中，无歧义 |
+| detect renamed | 文件改名成 `a.xlsx`… 后角色不变（证明不依赖文件名） |
+| detect month | 3/4/5 月并存时只选 4 月 |
+| detect missing | 空目录返回 `ok:false` 和 `missing` |
+| inspect / runtime | 参数转发正确，环境自检通过 |
+| profit | 产出两张盈亏表，未匹配趟次 ≤ 100 |
+| review / final | 指标等于基线，产出拆分版 + 两张盈亏表 |
+| package | zip 含 `detect.py`，版本与 manifest 一致 |
+
+依赖本地数据目录 `4月数据包/`、`数据/委办报表开发/3月/`、`数据/`（均不入库）。
+Windows 上偶发原生崩溃（0xC0000005）时脚本会自动重跑一次并打印 `[WARN]`；
+该问题的现状和已知边界见第九节。
+
+---
+
+## 十一、打包
 
 ```bash
 python post-office-agent-v6-source/build_packages.py
@@ -410,7 +473,9 @@ python post-office-agent-v6-source/build_packages.py
 产出两个包到仓库根目录：
 
 - `post-office-monthly-reconciliation-skill.zip`（后台 skill 包）
-- `邮局委办运输报表核对V6.0-agent.zip`（AgentOS 导入包，内嵌全部 skill 文件）
+- `邮局委办运输报表核对V6.2-agent.zip`（AgentOS 导入包，内嵌全部 skill 文件）
+
+包名与 `manifest.json` 的 `version` 同步，版本号变了包名自动跟着变，不要手改文件名。
 
 脚本会校验 `SKILL.md`、`manifest.json`、`assets/split-report-template.xlsx` 存在，
 缺任何一个直接报错。

@@ -30,7 +30,8 @@ from .excel_io import (
 )
 
 BASE_SHEETS = ("一干汇总", "二干基础")
-DAILY_CAOTAN = re.compile(r"^\d+月\d+日$")
+# 草滩「4月1」/「4月1日」，港务「4.1」
+DAILY_CAOTAN = re.compile(r"^\d+月\d+日?$")
 DAILY_GANGWU = re.compile(r"^\d+\.\d+$")
 
 # 这些角色按月区分版本；价格表/盈亏模板/初版模板跟随文档，不按月份淘汰。
@@ -78,11 +79,14 @@ class Detected:
         }
 
 
-def _finance_months(path: Path) -> list[tuple[int | None, int]]:
+def _finance_months(path: Path, header_row: int | None = None) -> list[tuple[int | None, int]]:
     """财务收入表没有日期 Sheet，用「流水号」前 4 位取**出现最多的月份**。
 
     财务表里会夹杂少量跨月记录（次日结算、补录），所以不能取全部月份，
     否则 5 月的表会因为几条 4 月记录也被判成 4 月。
+
+    header_row 由 classify_workbook 提供，避免重复打开工作簿
+    （Windows 上 openpyxl 只读模式重复打开同一文件有临时文件竞争）。
     """
     counts: dict[int, int] = {}
     try:
@@ -94,20 +98,31 @@ def _finance_months(path: Path) -> list[tuple[int | None, int]]:
             if hasattr(ws, "reset_dimensions"):
                 ws.reset_dimensions()
             stream = ws.iter_rows(values_only=True)
-            header_row = None
             serial = None
-            # 表头可能不在第 1 行（财务系统导出的前置说明行），先找「流水号」列
-            for offset, header in enumerate(stream, 1):
-                if offset > 30:
-                    break
-                columns = {normalize_text(v): i for i, v in enumerate(header) if v is not None}
-                if "流水号" in columns:
-                    header_row, serial = offset, columns["流水号"]
-                    break
-            if header_row is None:
+            start_row = header_row
+            if start_row:
+                # 已经知道表头行，直接跳到表头读取列位置
+                for offset, header in enumerate(stream, 1):
+                    if offset == start_row:
+                        columns = {
+                            normalize_text(v): i for i, v in enumerate(header) if v is not None
+                        }
+                        serial = columns.get("流水号")
+                        break
+            else:
+                for offset, header in enumerate(stream, 1):
+                    if offset > 30:
+                        break
+                    columns = {
+                        normalize_text(v): i for i, v in enumerate(header) if v is not None
+                    }
+                    if "流水号" in columns:
+                        start_row, serial = offset, columns["流水号"]
+                        break
+            if serial is None:
                 continue
-            for index, row in enumerate(stream, header_row + 1):
-                if index > header_row + 800:
+            for index, row in enumerate(stream, (start_row or 1) + 1):
+                if index > (start_row or 1) + 800:
                     break
                 if serial >= len(row):
                     continue
@@ -258,7 +273,7 @@ def _detect_from_profile(profile: FileProfile, month: tuple[int, int] | None = N
 
     months = list(profile.months)
     if role == "finance" and not months:
-        months = _finance_months(path)
+        months = _finance_months(path, profile.header_row)
     elif role == "base_report" and not months:
         months = _base_report_months(path)
     if not months:

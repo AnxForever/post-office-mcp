@@ -60,8 +60,9 @@ PRICE_ROUTE_HEADERS = {"邮路名称", "路向"}
 PRICE_BLANK_ROUTE_RUN = 10
 PROFIT_GROUP_HEADERS = ["趟次(趟)", "装载量(袋件)", "每车平均装载量(袋件)", "运费（元）", "结算收入（元）", "盈亏值（元）", "平均每车盈亏（元）"]
 
-# 在线测量表的两种日 Sheet 命名：草滩「8月1日」，港务「8.1」。
-DAILY_CAOTAN_SHEET = re.compile(r"^\d+月\d+日$")
+# 在线测量表的两种日 Sheet 命名：草滩「4月1」或「4月1日」，港务「4.1」。
+# 草滩实际导出不带「日」字，两种都要认。
+DAILY_CAOTAN_SHEET = re.compile(r"^\d+月\d+日?$")
 DAILY_GANGWU_SHEET = re.compile(r"^\d+\.\d+$")
 REVIEW_HEADERS = [
     "序号", "车辆承运单位", "派车单号", "邮路名称", "路单编号", "封车时间", None, "车牌号", None, "容间",

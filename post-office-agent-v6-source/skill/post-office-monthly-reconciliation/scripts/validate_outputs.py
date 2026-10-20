@@ -1,4 +1,5 @@
 from __future__ import annotations
+from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
 
 import argparse
 import json

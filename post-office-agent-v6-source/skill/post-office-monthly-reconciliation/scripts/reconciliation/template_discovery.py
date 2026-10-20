@@ -65,16 +65,39 @@ def discover_draft_template(path: Path | str) -> dict[str, Any]:
     return candidates[0]
 
 
+def _sheet_grid(worksheet, max_row: int) -> list[list[Any]]:
+    """一次性把前 max_row 行读成二维表。
+
+    只读工作表上每调用一次 `ws.cell(r, c)`，openpyxl 都会从头重新解析一遍
+    XML（`_read_only._get_cell`），复杂度退化成 O(n²)，在 Windows 上会触发
+    解析器访问冲突（0xC0000005 段错误）。这里统一改成单次顺序迭代。
+    """
+    grid: list[list[Any]] = []
+    for row_number, values in enumerate(worksheet.iter_rows(values_only=True), 1):
+        grid.append(list(values))
+        if row_number >= max_row:
+            break
+    return grid
+
+
+def _cell(grid: list[list[Any]], row: int, column: int) -> Any:
+    if row < 1 or column < 1 or row > len(grid):
+        return None
+    values = grid[row - 1]
+    return values[column - 1] if column <= len(values) else None
+
+
 def _profit_groups(worksheet) -> tuple[int, int, int, list[dict[str, Any]]] | None:
     expected = [_normalized(header) for header in PROFIT_GROUP_HEADERS]
     row_limit = min(worksheet.max_row or 0, 30)
     column_limit = worksheet.max_column or 0
-    for header_row in range(2, row_limit + 1):
+    grid = _sheet_grid(worksheet, row_limit)
+    for header_row in range(2, len(grid) + 1):
         group_row = header_row - 1
         groups: list[dict[str, Any]] = []
         for start in range(1, max(1, column_limit - len(expected) + 2)):
-            actual = [_normalized(worksheet.cell(header_row, start + offset).value) for offset in range(len(expected))]
-            label = normalize_text(worksheet.cell(group_row, start).value)
+            actual = [_normalized(_cell(grid, header_row, start + offset)) for offset in range(len(expected))]
+            label = normalize_text(_cell(grid, group_row, start))
             if actual == expected and label:
                 groups.append({
                     "label": label,
@@ -89,7 +112,7 @@ def _profit_groups(worksheet) -> tuple[int, int, int, list[dict[str, Any]]] | No
             (
                 row
                 for row in range(group_row - 1, 0, -1)
-                if any(normalize_text(worksheet.cell(row, column).value) for column in range(1, column_limit + 1))
+                if any(normalize_text(_cell(grid, row, column)) for column in range(1, column_limit + 1))
             ),
             0,
         )
@@ -112,15 +135,19 @@ def _sheet_year(worksheet, token: tuple[int | None, int], title_row: int) -> int
 
 
 def _profit_rows(worksheet, header_row: int) -> tuple[list[dict[str, Any]], int | None]:
+    """同样避免只读模式下逐格 `ws.cell()`：一次迭代取第一列即可。"""
     routes: list[dict[str, Any]] = []
     total_row = None
-    for row in range(header_row + 1, (worksheet.max_row or header_row) + 1):
-        value = normalize_text(worksheet.cell(row, 1).value)
+    for row_number, values in enumerate(
+        worksheet.iter_rows(min_row=header_row + 1, max_col=1, values_only=True),
+        header_row + 1,
+    ):
+        value = normalize_text(values[0] if values else None)
         if value == "合计":
-            total_row = row
+            total_row = row_number
             break
         if value and "-" in value:
-            routes.append({"route": value, "row": row})
+            routes.append({"route": value, "row": row_number})
     return routes, total_row
 
 

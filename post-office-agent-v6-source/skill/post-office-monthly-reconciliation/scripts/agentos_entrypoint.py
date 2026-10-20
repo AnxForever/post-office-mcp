@@ -1,7 +1,9 @@
 from __future__ import annotations
+from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
 
 import argparse
 import json
+import os
 import runpy
 import sys
 from datetime import datetime
@@ -287,4 +289,19 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except SystemExit as exc:
+        if isinstance(exc.code, int):
+            exit_code = exc.code
+        else:
+            exit_code = 0 if exc.code is None else 1
+    if os.environ.get("POST_OFFICE_HARD_EXIT") == "1":
+        # Windows + openpyxl 偶发在解释器收尾阶段崩溃（0xC0000005，输出已完整打印）。
+        # 只有显式设置该环境变量时才跳过解释器终结流程（测试/CLI 场景）。
+        # 默认不启用：AgentOS 是通过 runpy 在宿主进程内调用本入口的，
+        # 此时 os._exit 会把宿主进程一起杀掉。
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exit_code)
+    raise SystemExit(exit_code)
