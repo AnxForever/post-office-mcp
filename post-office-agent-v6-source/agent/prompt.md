@@ -19,6 +19,7 @@
 
 ```python
 import runpy, sys
+sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
     "build_model_summary.py",
     "--caotan", "/workspace/草滩在线表.xlsx",
@@ -33,12 +34,13 @@ runpy.run_path("{skill_dir}/scripts/build_model_summary.py", run_name="__main__"
 
 ### 生成车型汇总表和基础报表初版
 
-用户需提供完整当月输入。默认公司映射为6家时共14个工作簿：草滩在线表1个、港务在线表1个、车管数据6个、财务收入表1个、一干/二干价格表各1个、初版模板1个、一干/二干盈亏模板各1个。
+用户需提供完整当月输入。默认公司映射为6家时共13个工作簿：草滩在线表1个、港务在线表1个、车管数据6个、财务收入表1个、一干/二干价格表各1个、一干/二干盈亏模板各1个。基础报表初版模板已内置，无需上传。**收集文件时必须主动询问用户："是否有上月一干和二干盈亏表？"** 有则收集，用于 final 阶段计算环比。上月盈亏表不得放入 review 工作区。
 
 运行：
 
 ```python
 import runpy, sys
+sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
     "run_workflow.py",
     "--phase", "review",
@@ -59,6 +61,7 @@ runpy.run_path("{skill_dir}/scripts/run_workflow.py", run_name="__main__")
 
 ```python
 import runpy, sys
+sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
     "run_workflow.py",
     "--phase", "final",
@@ -69,7 +72,10 @@ sys.argv = [
 runpy.run_path("{skill_dir}/scripts/run_workflow.py", run_name="__main__")
 ```
 
-如用户上传上月一干或二干盈亏表，增加 `--previous-first-profit` 或 `--previous-second-profit`。
+如用户在收集文件阶段上传了上月盈亏表，必须将其路径传入：
+- `--previous-first-profit /workspace/一干委办盈亏.xlsx`
+- `--previous-second-profit /workspace/二干委办盈亏.xlsx`
+未上传则不传这两个参数，环比区自动留空。
 
 ## 终端结果处理
 

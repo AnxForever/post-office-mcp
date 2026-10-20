@@ -16,6 +16,11 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+from _paths import require_dir, require_file, resolve_out, save_workbook
+
 
 
 V16_HDR = ['序号','车辆承运单位','派车单号','邮路名称','路单编号','封车时间','','车牌号','','容间','吨位','公里','运输量','路单号','运价','标准价','备注','是否跨档','变动前容间','变动前时间','系数']
@@ -123,17 +128,21 @@ def std(rt, to_dest=False):
 def main():
     if len(sys.argv) < 8:
         print(__doc__); sys.exit(1)
-    M = int(sys.argv[1]); OUT = sys.argv[2]
-    CAOTAN, GANGWU = sys.argv[3], sys.argv[4]
-    YIGAN_PRICE, ERGAN_PRICE, CARRIER_DIR = sys.argv[5], sys.argv[6], sys.argv[7]
-    os.makedirs(OUT, exist_ok=True)
+    M = int(sys.argv[1]); OUT = str(resolve_out(sys.argv[2]))
+    CAOTAN = str(require_file(sys.argv[3], '草滩在线表'))
+    GANGWU = str(require_file(sys.argv[4], '港务在线表'))
+    YIGAN_PRICE = str(require_file(sys.argv[5], '一干价格表'))
+    ERGAN_PRICE = str(require_file(sys.argv[6], '二干价格表'))
+    CARRIER_DIR = str(require_dir(sys.argv[7], '车管基础数据目录'))
+    REPORT_YEAR = int(os.environ.get('POST_OFFICE_REPORT_YEAR', '2026'))
 
     FILL_H = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     FILL_R = PatternFill(start_color="FF6666", end_color="FF6666", fill_type="solid")
     FILL_O = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
     FILL_Y = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     FILL_WARN = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
-    FILL_B = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # 浅蓝：派车日未测·别处测过
+    FILL_B = PatternFill(start_color="BBD7EE", end_color="BBD7EE", fill_type="solid")  # 浅蓝：串行
+    FILL_DG = PatternFill(start_color="C65911", end_color="C65911", fill_type="solid")  # 深橙：降吨位
     FONT_H = Font(color="FFFFFF", bold=True, size=10)
     B = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
@@ -165,7 +174,7 @@ def main():
                     lv, wv, hv = gv('len'), gv('wid'), gv('hgt')
                     try: vol = float(lv) * float(wv) * float(hv) if lv and wv and hv else vol
                     except: pass
-                recs.append({'date': datetime(2026, M, int(m.group(2))), 'route': rt, 'plate': pl,
+                recs.append({'date': datetime(REPORT_YEAR, M, int(m.group(2))), 'route': rt, 'plate': pl,
                     'trailer': str(gv('trailer') or "").strip(), 'len': gv('len'), 'wid': gv('wid'),
                     'hgt': gv('hgt'), 'vol': vol, 'issue': gv('issue'), 'src': src})
         wb.close(); return recs
@@ -203,7 +212,8 @@ def main():
     CAR_CORE = [('trailer', ['车厢码', '车厢车牌号', '挂车']),
                 ('plate', ['车牌号', '车号']), ('route', ['邮路名称', '邮路', '路线']),
                 ('dispatch', ['派车单号']), ('seal', ['邮路执行日期', '封车']),
-                ('qty', ['邮运量', '运输量'])]
+                ('qty', ['邮运量', '运输量']),
+                ('settle_ton', ['结算吨位'])]
     records = []; car_logged = False
     for f in sorted(os.listdir(CARRIER_DIR)):
         if not f.endswith('.xlsx') or f.startswith('~$'): continue
@@ -233,7 +243,8 @@ def main():
                 'company': company,
                 'dispatch': dp.replace('.0', '') if dp.endswith('.0') else dp,
                 'seal_date_str': sd,
-                'transport_qty': ws_car.cell(row, cc['qty']).value if cc.get('qty') else None})
+                'transport_qty': ws_car.cell(row, cc['qty']).value if cc.get('qty') else None,
+                'settle_ton': ws_car.cell(row, cc['settle_ton']).value if cc.get('settle_ton') else None})
         wb_car.close()
     logd(f"车管记录共 {len(records)} 条（行来源）")
 
@@ -316,6 +327,48 @@ def main():
                 if r['final_vol'] >= limit: r['ton'] = ton; r['coeff'] = coef; break
         r['is_ergan'] = ie
 
+    # ====== 降吨位：结算吨位(C35)覆盖车型吨位 ======
+    def _ton_num(tier_name):
+        """从吨位名提取数值: '40吨B'→40, '30吨'→30, '2.75吨'→2.75"""
+        m = re.search(r'(\d+\.?\d*)', str(tier_name))
+        return float(m.group(1)) if m else 0
+
+    downgrade_count = 0
+    for r in records:
+        st = r.get('settle_ton')
+        if st is None: continue
+        try: st_val = float(st)
+        except (ValueError, TypeError): continue
+        if st_val <= 0: continue
+        r['settle_ton'] = st_val
+
+        tiers = ergan_tiers if r['is_ergan'] else yigan_tiers
+        if not tiers: continue
+        # 只有车型吨位≥30吨才考虑降吨位（12吨车的结算9吨是载重记录，非降吨位）
+        if not r['ton']: continue
+        vol_ton_num = _ton_num(r['ton'])
+        if vol_ton_num < 30: continue
+
+        # 找结算吨位对应的价格档: 取吨位数值≤st_val的最大档(档位已按容积下限降序)
+        settle_tier = settle_coef = None
+        settle_ton_num = 0
+        for limit, ton, coef, _c in tiers:
+            tn = _ton_num(ton)
+            if tn <= st_val:
+                settle_tier = ton; settle_coef = coef; settle_ton_num = tn; break
+
+        # 降吨位: 结算档 < 车型档 且 车型≥30吨
+        if settle_tier and settle_ton_num < vol_ton_num:
+            r['orig_ton'] = r['ton']    # 车型吨位（仅标记，不用于价格）
+            r['orig_coeff'] = r['coeff']
+            r['ton'] = settle_tier      # 结算吨位 → 用于价格匹配
+            r['coeff'] = settle_coef
+            r['downgrade'] = True
+            downgrade_count += 1
+
+    if downgrade_count:
+        logd(f"降吨位: 结算吨位(C35)与车型吨位不一致, 共 {downgrade_count} 条按结算吨位定档")
+
     # ====== Step 3: 跨档 + 变动前 ======
     pt = defaultdict(list)
     for r in records:
@@ -324,15 +377,15 @@ def main():
     records.sort(key=lambda x: (x['plate'], x['date'] or datetime(2000, 1, 1)))
     pv_rec = {}
     for r in records:
-        r['cross'] = bool(r['ton'] and r['ton'] != pn.get(r['plate']))
+        r['cross'] = bool(r['ton'] and r['ton'] != pn.get(r['plate']) and not r.get('downgrade'))
         if r['plate'] in pv_rec:
             r['prev_vol'] = pv_rec[r['plate']]['final_vol']; r['prev_date'] = pv_rec[r['plate']]['date']
         pv_rec[r['plate']] = r
 
     miss = sum(1 for r in records if r['missing']); unm = sum(1 for r in records if r['unmeasured'])
     other = sum(1 for r in records if r.get('measured_other_date'))
-    cross = sum(1 for r in records if r['cross']); total = len(records)
-    print(f"  红(缺失)={miss} 橙(未测量)={unm} 蓝(派车日未测·别处测过)={other} 黄(跨档)={cross} 总={total}")
+    cross = sum(1 for r in records if r['cross']); dg = sum(1 for r in records if r.get('downgrade')); total = len(records)
+    print(f"  红(缺失)={miss} 橙(未测量)={unm} 蓝(派车日未测·别处测过)={other} 黄(跨档)={cross} 降吨位={dg} 总={total}")
 
     # ====== Step 4: 价格匹配 ======
     print("Step 4: 价格匹配...")
@@ -352,6 +405,18 @@ def main():
         if r['km']: km_ok += 1
         if r['price']: price_ok += 1
     print(f"  公里={km_ok}({100*km_ok/total:.1f}%) 标准价={price_ok}({100*price_ok/total:.1f}%)")
+
+    # ====== 降吨位：计算原运费 ======
+    # 官方公式: 原运费 = 当前路线标准价 × 原车型系数
+    # 差价 = 当前运费(结算吨位) - 原运费(车型吨位)
+    for r in records:
+        if not r.get('downgrade'): continue
+        if r.get('price') and r.get('orig_coeff'):
+            try:
+                r['orig_freight'] = round(r['orig_coeff'] * float(r['price']), 2)
+                if r.get('freight') is not None:
+                    r['price_diff'] = round(r['freight'] - r['orig_freight'], 2)
+            except: pass
 
     # Step 5: 车管数据已在 Step 2b 读入 records，无需单独匹配
     # 承运单位/派车单号/封车时间/运输量 已随行来源填入
@@ -379,6 +444,14 @@ def main():
             issues.append(f"价格表未覆盖：路线「{r['route']}」在{'二干' if r['is_ergan'] else '一干'}价格表中未找到（目的地={dest}）。需人工确认标准价和公里")
         if r['price'] is None and r['km'] is not None:
             issues.append(f"吨位无价格：路线在价格表中已找到（公里={r['km']}），但吨位「{r['ton']}」无对应价格列。运价无法计算")
+        if r.get('downgrade'):
+            orig_tn = r.get('orig_ton', '?')
+            orig_f = r.get('orig_freight')
+            diff = r.get('price_diff')
+            if diff is not None:
+                issues.append(f"降吨位：车型={orig_tn}→结算={r['ton']}，原运费={orig_f} 差价={diff:+}（结算吨位来自车管C35）")
+            else:
+                issues.append(f"降吨位：车型={orig_tn}→结算={r['ton']}（结算吨位来自车管C35，价格待补）")
         r['issues'] = issues
 
     DRAFT = f"{OUT}/{M}月_02_基础报表初版.xlsx"
@@ -386,14 +459,14 @@ def main():
 
     # 结构发现 Sheet（放最前，供人工核验本月各表结构是否被正确识别）
     ws_s = wb_o.active; ws_s.title = "结构发现"
-    ws_s.cell(row=1, column=1, value="[*]️ 本次运行动态识别的各源文件结构（请核对是否正确，若识别错请检查源文件表头）").font = Font(bold=True, size=11, color="0070C0")
+    ws_s.cell(row=1, column=1, value="[*] 本次运行动态识别的各源文件结构（请核对是否正确，若识别错请检查源文件表头）").font = Font(bold=True, size=11, color="0070C0")
     for i, line in enumerate(DISCOVERY_LOG, start=3):
         ws_s.cell(row=i, column=1, value=line).font = Font(size=10)
     ws_s.column_dimensions['A'].width = 160
 
     ws_i = wb_o.create_sheet(title="问题汇总")
     ws_i.merge_cells('A1:K1')
-    ws_i.cell(row=1, column=1, value="[!]️ 需人工核对修正 —— 按「问题类型」列筛选可批量处理；核对后在「处理结果」列标注，全部确认无误后方可拆分/盈亏").font = Font(bold=True, size=11, color="FF0000")
+    ws_i.cell(row=1, column=1, value="[!] 需人工核对修正 —— 按「问题类型」列筛选可批量处理；核对后在「处理结果」列标注，全部确认无误后方可拆分/盈亏").font = Font(bold=True, size=11, color="FF0000")
     HDR_I = ['问题类型', 'Sheet', '行号', '车牌号', '路线', '路线类型', '当前吨位', '容间', '问题详情（请逐条核对）', '建议动作', '处理结果（人工填写）']
     for c, h in enumerate(HDR_I, 1):
         cl = ws_i.cell(row=3, column=c, value=h); cl.fill = FILL_H; cl.font = FONT_H; cl.border = B
@@ -408,8 +481,9 @@ def main():
         if '吨位无价格' in det: return (5, '吨位无价格', '路线已匹配到价格表，补该吨位对应的标准价')
         if '跨档' in det: return (6, '跨档', '核对本次吨位（偏离同车牌众数），确认是否真跨档')
         if '吨位无法判定' in det: return (7, '吨位无法判定', '容间异常，人工确认吨位')
+        if '降吨位' in det: return (0, '降吨位', '结算吨位低于车型吨位，已自动按结算吨位定档。请核对车管C35结算吨位是否准确')
         return (9, '其他', '人工核对')
-    TYPE_COLOR = {'派车日未测': FILL_B, '完全未测量': FILL_O, '跨档': FILL_Y}
+    TYPE_COLOR = {'派车日未测': FILL_B, '串行(跨站点取容积)': FILL_B, '完全未测量': FILL_O, '跨档': FILL_Y, '降吨位': FILL_DG}
 
     rows = []
     for i, r in enumerate(records):
@@ -444,8 +518,15 @@ def main():
         cl = ws_d.cell(row=1, column=c, value=h); cl.fill = FILL_H; cl.font = FONT_H; cl.border = B
     for i, r in enumerate(records):
         row = i + 2
-        rp = [p for p in [str(r['issue']) if r['issue'] else None] if p and p != 'None']
-        if r['issues']: rp.append('【[!]️需核对】' + '；'.join(r['issues']))
+        rp = []
+        if r['issue'] and str(r['issue']).strip() not in ('', 'None'):
+            raw = str(r['issue']).strip()
+            # 纯数字 → 标注含义不明确
+            if re.match(r'^\d+\.?\d*$', raw):
+                rp.append(f'{raw}（车型问题原文为纯数字，含义不明确，请确认是否为车型代号或挂车号错填）')
+            else:
+                rp.append(raw)
+        if r['issues']: rp.append('【[!]需核对】' + '；'.join(r['issues']))
         remark = ' | '.join(rp) if rp else None
         vals = {1: i+1, 2: r.get('company'), 3: r.get('dispatch'), 4: r['route'],
             6: r.get('seal_date_str'), 8: r['plate'],
@@ -454,16 +535,16 @@ def main():
             15: r['freight'], 16: r['price'], 17: remark,
             18: '是' if r['cross'] else '否',
             19: r.get('prev_vol'), 20: r['prev_date'].strftime('%Y-%m-%d') if r.get('prev_date') else None, 21: r['coeff']}
-        color = FILL_R if r['missing'] else (FILL_O if r['unmeasured'] else (FILL_Y if r['cross'] else (FILL_B if (r.get('vol_cross_station') or r.get('measured_other_date')) else None)))
+        color = FILL_R if r['missing'] else (FILL_O if r['unmeasured'] else (FILL_DG if r.get('downgrade') else (FILL_Y if r['cross'] else (FILL_B if r.get('vol_cross_station') else None))))
         for c in range(1, 22):
             cl = ws_d.cell(row=row, column=c, value=vals.get(c)); cl.border = B
             if color: cl.fill = color
     for c, w in enumerate([6, 24, 16, 28, 12, 14, 2, 12, 2, 14, 8, 8, 10, 14, 10, 10, 20, 8, 10, 14, 8], 1):
         ws_d.column_dimensions[get_column_letter(c)].width = w
-    wb_o.save(DRAFT); wb_o.close()
+    DRAFT = save_workbook(wb_o, DRAFT)
 
     print(f"\n[OK] 初版已生成: {DRAFT}")
-    print(f"[汇总] 总={total} | 红(缺失)={miss} 橙(未测量)={unm} 黄(跨档)={cross}")
+    print(f"[汇总] 总={total} | 红(缺失)={miss} 橙(未测量)={unm} 黄(跨档)={cross} 降吨位={dg}")
     print(f"[匹配] 公里={100*km_ok/total:.1f}% 标准价={100*price_ok/total:.1f}%")
     print(f"[问题汇总] {ic} 条待人工核对")
     print("\n[STOP] 铁律：初版生成后停止。拆分/盈亏须在人工核对修正初版之后再执行。")

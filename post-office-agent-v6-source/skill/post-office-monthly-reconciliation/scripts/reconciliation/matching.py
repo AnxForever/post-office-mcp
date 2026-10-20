@@ -26,6 +26,7 @@ class MatchResult:
 @dataclass
 class PriceMatch:
     kind: str | None = None
+    catalog_kind: str | None = None
     route: str | None = None
     tonnage: str | None = None
     distance: float | int | None = None
@@ -127,6 +128,14 @@ def _alias_route(route: str, aliases: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _alias_price_source(route: str, aliases: Mapping[str, Any]) -> str | None:
+    entry = _alias_entry(route, aliases)
+    if isinstance(entry, Mapping):
+        value = normalize_text(entry.get("price_source"))
+        return value or None
+    return None
+
+
 def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[str, Any] | None:
     eligible: list[tuple[Decimal, Mapping[str, Any]]] = []
     for tier in catalog.get("tiers", []):
@@ -148,38 +157,59 @@ def match_price(
     try:
         volume_number = Decimal(str(volume))
     except Exception:
-        return PriceMatch(issues=[Issue("volume_missing", "red", "无法用容间判定吨位", "人工补充有效容间")])
+        # Keep resolving route kind and distance even when the model summary
+        # has no volume. The official special sheets still classify such rows;
+        # only tonnage, standard price and freight remain blank.
+        volume_number = None
     candidates = route_candidates(route, aliases)
     resolved_kind: str | None = None
+    catalog_kind: str | None = None
     resolved_route: str | None = None
     for candidate in candidates:
         preferred = _alias_kind(candidate, aliases)
         if preferred in catalogs:
             resolved_kind = preferred
+            catalog_kind = _alias_price_source(candidate, aliases) or preferred
+            if catalog_kind not in catalogs:
+                catalog_kind = preferred
             resolved_route = _alias_route(candidate, aliases) or candidate
             break
         matching_kinds = [kind for kind, catalog in catalogs.items() if candidate in catalog.get("routes", {})]
         if matching_kinds:
             resolved_kind = matching_kinds[0]
+            catalog_kind = resolved_kind
             resolved_route = candidate
             break
     if not resolved_kind:
         return PriceMatch(issues=[Issue("price_route_uncovered", "red", "路线未被一干或二干价格表覆盖且无法识别干线类型", "维护路线别名或价格资产")])
 
-    catalog = catalogs[resolved_kind]
-    tier = _select_tier(volume_number, catalog)
+    catalog_kind = catalog_kind or resolved_kind
+    catalog = catalogs[catalog_kind]
+    tier = _select_tier(volume_number, catalog) if volume_number is not None else None
     route_info = None
     for candidate in ([resolved_route] if resolved_route else []) + candidates:
         route_info = catalog.get("routes", {}).get(candidate)
         if route_info:
             resolved_route = candidate
             break
+    if volume_number is None:
+        issues = [Issue("volume_missing", "red", "无法用容间判定吨位", "人工补充有效容间")]
+        if not route_info:
+            issues.append(Issue("price_route_uncovered", "red", "路线未被对应干线价格表覆盖", "维护路线别名或价格资产"))
+        return PriceMatch(
+            kind=resolved_kind,
+            catalog_kind=catalog_kind,
+            route=resolved_route,
+            distance=route_info.get("distance") if route_info else None,
+            issues=issues,
+        )
     if not tier:
         issues = [Issue("tonnage_below_minimum", "red", "容间低于价格表最低吨位档", "人工确认吨位和价格")]
         if not route_info:
             issues.append(Issue("price_route_uncovered", "red", "路线未被对应干线价格表覆盖", "维护路线别名或价格资产"))
         return PriceMatch(
             kind=resolved_kind,
+            catalog_kind=catalog_kind,
             route=resolved_route,
             distance=route_info.get("distance") if route_info else None,
             issues=issues,
@@ -190,6 +220,7 @@ def match_price(
     if not route_info:
         return PriceMatch(
             kind=resolved_kind,
+            catalog_kind=catalog_kind,
             route=resolved_route,
             tonnage=key,
             model_tonnage=key,
@@ -200,6 +231,7 @@ def match_price(
     if standard in (None, ""):
         return PriceMatch(
             kind=resolved_kind,
+            catalog_kind=catalog_kind,
             route=resolved_route,
             tonnage=key,
             model_tonnage=key,
@@ -210,6 +242,7 @@ def match_price(
     freight = Decimal(str(coefficient)) * Decimal(str(standard))
     return PriceMatch(
         kind=resolved_kind,
+        catalog_kind=catalog_kind,
         route=resolved_route,
         tonnage=key,
         model_tonnage=key,

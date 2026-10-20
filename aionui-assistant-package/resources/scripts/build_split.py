@@ -17,6 +17,11 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Border, Side
 from openpyxl.utils import get_column_letter
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+from _paths import require_file, resolve_out, save_workbook
+
 
 def std(rt, to_dest=False):
     r = rt.strip(); r = re.sub(r'\([^)]*\)', '', r).strip()
@@ -159,9 +164,9 @@ def load_draft(path):
 def main():
     if len(sys.argv) < 5:
         print(__doc__); sys.exit(1)
-    M = int(sys.argv[1]); OUT = sys.argv[2]
-    DRAFT = sys.argv[3]; SPLIT_TEMPLATE = sys.argv[4]
-    os.makedirs(OUT, exist_ok=True)
+    M = int(sys.argv[1]); OUT = str(resolve_out(sys.argv[2]))
+    DRAFT = str(require_file(sys.argv[3], '核对后初版'))
+    SPLIT_TEMPLATE = str(require_file(sys.argv[4], '拆分模板'))
 
     FILL_H = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     FONT_H = Font(color="FFFFFF", bold=True, size=10)
@@ -174,6 +179,7 @@ def main():
     print("Step 7: 拆分...")
     wb_t = openpyxl.load_workbook(SPLIT_TEMPLATE, data_only=False)
     STD = [s for s in wb_t.sheetnames if s not in SPECIAL_SHEETS | BLANK_SHEETS and effective_headers(wb_t[s])]
+    STD.sort(key=lambda s: (len(s), s))  # 短名优先: 银川→银川往返
     tmpl_info = {}
     for sname in STD:
         ws = wb_t[sname]
@@ -185,25 +191,45 @@ def main():
         d, f = std(rt), std(rt)
         return (d.split('-')[-1] if '-' in d else d), f
 
-    sr = defaultdict(list); ex = defaultdict(list); ambiguous = []
+    sr = defaultdict(list); ex = defaultdict(list); ambiguous = []; excluded_reverse = 0
     for rec in records:
         d, f = dc(rec['route']); m = None
         is_ambiguous = False
         route_key = std(rec['route'])
         company = str(rec.get('company') or '')
-        m = hint_exact.get((route_key, company)) or hint_route.get(route_key)
-        exact_dest = [s for s in STD if s.split('（')[0] == d]
-        if not m and len(exact_dest) == 1:
-            m = exact_dest[0]
-        elif not m and len(exact_dest) > 1:
-            ambiguous.append((rec['route'], company, exact_dest))
-            is_ambiguous = True
+        # 1. 模板hints优先 (处理 平凉→平凉二干 等映射)
+        m_exact = hint_exact.get((route_key, company))
+        # exact hint指向往返Sheet时不信任(模板写入顺序导致覆盖)
+        if m_exact and '往返' in m_exact:
+            m_exact = None
+        m_route = hint_route.get(route_key) if not m_exact else None
+        m = m_exact or m_route
+        # route级hint指向往返Sheet时改到基础Sheet
+        if m and '往返' in m:
+            base = m.replace('往返', '')
+            if base in STD: m = base
+        # 3. 无hints时用目的地匹配
+        if not m:
+            exact_dest = [s for s in STD if s.split('（')[0] == d]
+            if len(exact_dest) == 1:
+                m = exact_dest[0]
+            elif len(exact_dest) > 1:
+                ambiguous.append((rec['route'], company, exact_dest))
+                is_ambiguous = True
+        # 4. 最后兜底字符串匹配
         if not m and not is_ambiguous:
             for s in STD:
                 if s in rec['route'] or s.split('（')[0] in f:
                     m = s; break
-        if m: sr[m].append(rec)
-        else: ex[f"※{d}"].append(rec)
+        # 官方规则：排除反向路线（如 宝鸡-西安 不放入宝鸡Sheet）
+        if m:
+            sheet_city = m.split('（')[0].split('(')[0]
+            clean_route = std(rec['route'])
+            if clean_route.startswith(sheet_city + '-') and not clean_route.startswith('西安-'):
+                excluded_reverse += 1
+                continue
+            sr[m].append(rec)
+        else: ex[f"*{d}"].append(rec)
 
     sh = STD + sorted(ex.keys())
     SPLIT = f"{OUT}/{M}月_03_基础报表拆分版.xlsx"
@@ -248,13 +274,44 @@ def main():
                     cl = ws.cell(row=rw, column=c, value=v); cl.border = B; cl.font = Font(bold=True)
         for c, w in enumerate([6,24,16,28,12,14,2,12,2,14,8,8,10,14,10,10,20,20], 1):
             if c <= ncols: ws.column_dimensions[get_column_letter(c)].width = w
+    # ====== 降吨位 Sheet ======
+    dg_recs = []
+    for rec in records:
+        issue = str(rec.get('issue') or '')
+        if '降吨位' in issue:
+            dg_recs.append(rec)
+    if dg_recs:
+        dg_hdrs = ['序号','车辆承运单位','派车单号','邮路名称','路单编号','封车时间','车牌号','容间','吨位','公里','运输量','运价（保留两位数）','标准价','运价','备注','原运费','差价']
+        ws_dg = wb_o.create_sheet(title='降吨位')
+        for c, h in enumerate(dg_hdrs, 1):
+            cl = ws_dg.cell(row=1, column=c, value=h); cl.fill = FILL_H; cl.font = FONT_H; cl.border = B
+        for i, rec in enumerate(dg_recs):
+            rw = i + 2
+            # 标准列
+            vals = record_values(dg_hdrs[:15], rec, i + 1)
+            for c, v in enumerate(vals, 1):
+                ws_dg.cell(row=rw, column=c, value=v).border = B
+            # 吨位列: 显示原车型吨位
+            remark = str(rec.get('issue') or '')
+            m = re.search(r'车型=(.+?)→', remark)
+            ws_dg.cell(row=rw, column=9, value=m.group(1) if m else rec.get('ton')).border = B
+            # 原运费 + 差价
+            m2 = re.search(r'原运费=([\d.]+).*?差价=([\d.+-]+)', remark)
+            if m2:
+                ws_dg.cell(row=rw, column=16, value=float(m2.group(1))).border = B
+                ws_dg.cell(row=rw, column=17, value=float(m2.group(2))).border = B
+        for c, w in enumerate([6,24,16,28,12,14,12,14,8,8,10,14,10,10,20,14,14], 1):
+            ws_dg.column_dimensions[get_column_letter(c)].width = w
+        print(f"  [降吨位] 生成降吨位Sheet: {len(dg_recs)} 条")
+
     wb_t.close()
-    wb_o.save(SPLIT); wb_o.close()
-    print(f"\n[OK] 拆分版已生成: {SPLIT}  ({len(sh)} 个 Sheet，其中新建※Sheet {len(ex)} 个)")
+    SPLIT = save_workbook(wb_o, SPLIT)
+    print(f"\n[OK] 拆分版已生成: {SPLIT}  ({len(sh) + (1 if dg_recs else 0)} 个 Sheet，其中新建*Sheet {len(ex)} 个)")
+    print(f"  [反向] 排除反向路线(如宝鸡-西安): {excluded_reverse} 条")
     if ex:
-        print(f"  [!]️ 模板无对应Sheet、已新建※前缀: {', '.join(sorted(ex.keys()))}")
+        print(f"  [!] 模板无对应Sheet、已新建*前缀: {', '.join(sorted(ex.keys()))}")
     if ambiguous:
-        print(f"  [!]️ {len(ambiguous)} 条路线存在多个同城Sheet且模板无唯一历史提示，已放入※Sheet，需人工确认")
+        print(f"  [!] {len(ambiguous)} 条路线存在多个同城Sheet且模板无唯一历史提示，已放入*Sheet，需人工确认")
 
 
 if __name__ == "__main__":

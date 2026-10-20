@@ -14,7 +14,7 @@ from reconciliation.normalize import tonnage_key
 from reconciliation.calculations import aggregate_profit
 from reconciliation.excel_io import read_finance_rows, read_price_catalog
 from reconciliation.integrity import file_sha256, validate_dynamic_state, verify_state_files
-from reconciliation.model_summary import HEADERS as MODEL_SUMMARY_HEADERS
+from reconciliation.model_summary import EVIDENCE_HEADERS, HEADERS as MODEL_SUMMARY_HEADERS
 from reconciliation.profit_audit import audit_profit_workbook
 from reconciliation.template_discovery import discover_draft_template, discover_profit_template, discover_split_template
 from reconciliation.templates import ISSUE_HEADERS, PROFIT_SUMMARY_HEADERS, REVIEW_HEADERS
@@ -65,12 +65,22 @@ def _validate_model_summary(state: dict[str, Any], errors: list[str], checks: di
         return
     try:
         checks["model_summary_sheets"] = wb.sheetnames
-        if wb.sheetnames != ["车型汇总"]:
-            errors.append("车型汇总表结构无效：必须且只能包含车型汇总 Sheet")
+        if wb.sheetnames != ["车型汇总", "容积取证"]:
+            errors.append("车型汇总表结构无效：必须依次包含车型汇总和容积取证 Sheet")
             return
         headers = [cell.value for cell in wb["车型汇总"][1]]
         if headers != MODEL_SUMMARY_HEADERS:
             errors.append("车型汇总表结构无效：表头不一致")
+        evidence = wb["容积取证"]
+        if [cell.value for cell in evidence[1]] != EVIDENCE_HEADERS:
+            errors.append("容积取证表结构无效：表头不一致")
+        summary_rows = max(0, wb["车型汇总"].max_row - 1)
+        evidence_rows = max(0, evidence.max_row - 1)
+        checks["model_summary_rows"] = summary_rows
+        checks["volume_evidence_rows"] = evidence_rows
+        if summary_rows != evidence_rows:
+            errors.append("容积取证记录数与车型汇总记录数不一致")
+        errors.extend(_review_formula_errors(wb))
     finally:
         wb.close()
 

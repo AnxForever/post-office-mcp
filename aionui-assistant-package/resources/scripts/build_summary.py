@@ -14,6 +14,11 @@ import openpyxl
 from collections import defaultdict
 from openpyxl.styles import Font, PatternFill, Border, Side
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+from _paths import require_file, resolve_out, save_workbook
+
 
 
 HDR = ['序号', '邮路', '车号', '挂车号', '长（m）', '宽（m）', '高（m）', '测量容积（方）', '预报载重（吨）', '未装容积（米）', '车型问题']
@@ -51,11 +56,11 @@ def extract(path, pat_str, month, src):
                 col['plate'] = c
             if '邮路' in h and 'route' not in col:
                 col['route'] = c
-            if h == '长' and 'len' not in col:
+            if '长' in h and 'len' not in col:
                 col['len'] = c
-            if h == '宽' and 'wid' not in col:
+            if '宽' in h and 'wid' not in col:
                 col['wid'] = c
-            if h == '高' and 'hgt' not in col:
+            if '高' in h and 'hgt' not in col:
                 col['hgt'] = c
             if '容积' in h and 'vol' not in col:
                 col['vol'] = c
@@ -103,9 +108,9 @@ def main():
     if len(sys.argv) < 5:
         print(__doc__)
         sys.exit(1)
-    M = int(sys.argv[1]); OUT = sys.argv[2]
-    CAOTAN, GANGWU = sys.argv[3], sys.argv[4]
-    os.makedirs(OUT, exist_ok=True)
+    M = int(sys.argv[1]); OUT = str(resolve_out(sys.argv[2]))
+    CAOTAN = str(require_file(sys.argv[3], '草滩在线表'))
+    GANGWU = str(require_file(sys.argv[4], '港务在线表'))
 
     print('Step 1: 提取在线表...')
     ct = extract(CAOTAN, r'^(\d+)月(\d+)日?$', M, '草滩')
@@ -159,7 +164,7 @@ def main():
         ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = w
 
     F = os.path.join(OUT, '%d月_01_车型汇总表.xlsx' % M)
-    wb_o.save(F); wb_o.close()
+    F = save_workbook(wb_o, F)
     total = len(ct) + len(gw)
     print('  草滩=%d 港务=%d 合并=%d' % (len(ct), len(gw), total))
     if filled:

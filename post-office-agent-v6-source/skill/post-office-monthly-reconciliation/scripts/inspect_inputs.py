@@ -39,7 +39,6 @@ REQUIRED_ROLES = {
     "second_price": 1,
     "first_profit_template": 1,
     "second_profit_template": 1,
-    "draft_template": 1,
 }
 PACKAGE_VERSION = "6.0.0"
 
@@ -120,12 +119,19 @@ def inspect_inputs(
     by_role: dict[str, list[Any]] = {}
     for profile in profiles:
         by_role.setdefault(profile.role, []).append(profile)
-    active_profiles = {role: by_role.get(role, []) for role in REQUIRED_ROLES}
-    ignored_models = by_role.get("model", [])
+    # 初版模板是可选的：没有上传时由 build_review_workbook 回落到内置 assets/draft-template.xlsx。
+    # integrity.DYNAMIC_ROLE_COUNTS 要求该角色必须存在，所以这里补一条指向内置模板的条目。
     package_dir = Path(__file__).resolve().parents[1]
     assets_root = Path(assets_dir) if assets_dir else package_dir / "assets"
+    if "draft_template" not in by_role:
+        bundled = assets_root / "draft-template.xlsx"
+        if bundled.is_file():
+            by_role["draft_template"] = [classify_workbook(bundled)]
+    roles_required = dict(REQUIRED_ROLES, draft_template=1)
+    active_profiles = {role: by_role.get(role, []) for role in roles_required}
+    ignored_models = by_role.get("model", [])
     company_map: dict[str, Any] | None = None
-    expected_role_counts = dict(REQUIRED_ROLES)
+    expected_role_counts = dict(roles_required)
     try:
         company_map = load_company_map(assets_root / "company-map.json")
         expected_role_counts["vehicle"] = len(company_map["companies"])

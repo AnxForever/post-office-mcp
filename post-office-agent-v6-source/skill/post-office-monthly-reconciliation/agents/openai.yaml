@@ -1,4 +1,7 @@
 interface:
-  display_name: "邮局月度委办运输报表核对"
-  short_description: "核对在线测量、车管、价格和财务数据并生成月度委办运输报表"
-  default_prompt: "Use $post-office-monthly-reconciliation to process and verify this month’s postal outsourced transportation reports."
+  display_name: "邮局月度委办运输报表核对 V6.0"
+  short_description: "核对在线测量、车管、价格和财务数据，生成车型汇总表、基础报表初版、拆分版和盈亏表"
+  default_prompt: "使用 $post-office-monthly-reconciliation 处理并核对本月邮局委办运输报表。"
+
+policy:
+  allow_implicit_invocation: true

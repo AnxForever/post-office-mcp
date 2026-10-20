@@ -15,7 +15,6 @@ from reconciliation.excel_io import file_sha256, read_finance_rows, read_price_c
 from reconciliation.integrity import REQUIRED_ASSETS, validate_authoritative_rows, validate_authoritative_state, verify_state_files
 from reconciliation.matching import _tonnage_number, apply_settlement_tonnage, match_price
 from reconciliation.normalize import normalize_plate, normalize_text, route_candidates, tonnage_key
-from reconciliation.monthly_comparison import read_previous_month_totals
 from reconciliation.template_discovery import discover_profit_template, discover_split_template
 from reconciliation.templates import REVIEW_HEADERS, write_profit_workbook, write_split_workbook
 
@@ -236,32 +235,10 @@ def _recalculate_derived_fields(
         row["plate_key"] = normalize_plate(row.get("plate"))
         previous_tonnage = tonnage_key(row.get("tonnage"))
         supplied_standard_price = row.get("standard_price")
-        price = match_price(row.get("route"), row.get("volume"), catalogs, aliases)
-        if price.kind in catalogs:
-            # A downgrade is a business instruction, not an automatic numeric
-            # comparison. It is confirmed only when the corrected workbook's
-            # remark/result explicitly records the decision and the edited
-            # tonnage is lower than the volume-derived model tier.
-            model_number = _tonnage_number(price.model_tonnage)
-            edited_tonnage = tonnage_key(row.get("tonnage"))
-            edited_number = _tonnage_number(edited_tonnage)
-            confirmation_text = " ".join(
-                str(value or "")
-                for value in [row.get("remark"), *list(row.get("manual_results") or [])]
-            )
-            confirmed = bool(
-                edited_number is not None
-                and model_number is not None
-                and edited_number < model_number
-                and any(token in confirmation_text for token in ("调度", "降吨", "结算", "确认"))
-            )
-            settlement_value = edited_tonnage if confirmed else row.get("settlement_tonnage")
-            price = apply_settlement_tonnage(
-                price,
-                settlement_value,
-                catalogs[price.kind],
-                confirmed=confirmed,
-            )
+        volume = row.get("volume")
+        if volume is None or volume == "":
+            volume = 0
+        price = match_price(row.get("route"), volume, catalogs, aliases)
         row["price_kind"] = price.kind
         row["standard_route"] = price.route
         row["model_tonnage"] = price.model_tonnage
@@ -271,7 +248,8 @@ def _recalculate_derived_fields(
         row["price_difference"] = price.price_difference
         if not price.tonnage:
             for field in ("tonnage", "coefficient", "distance", "standard_price", "freight"):
-                row[field] = None
+                if row.get(field) in (None, ""):
+                    row[field] = None
             continue
 
         row["tonnage"] = price.tonnage
@@ -405,14 +383,18 @@ def build_final_reports(
     if sum(expected_split_counts.values()) != len(rows):
         split_path.unlink(missing_ok=True)
         raise ValueError("拆分版记录数与修订初版不守恒")
-    # These tabs are deliberately not inferred from a blank static mother
-    # template. Their populated form depends on monthly dispatch decisions;
-    # report them as manual-pending instead of scanning the huge official tabs
-    # or silently presenting an empty tab as complete.
+    # These tabs are generated from explicit business classifications. The
+    # two-trip tab remains manual-pending when the corrected workbook contains
+    # no explicit merge instruction; it must never be inferred from a plate or
+    # route alone.
     special_sheet_status = {
-        name: "manual_pending"
-        for name in ("二干基础", "一干汇总", "两趟合一趟")
-        if name in split_layout.get("sheets", ())
+        "二干基础": "populated" if any(row.get("price_kind") == "second" for row in rows) else "manual_pending",
+        "一干汇总": "populated" if any(row.get("price_kind") == "first" for row in rows) else "manual_pending",
+        "两趟合一趟": (
+            "populated"
+            if any(any(token in str(row.get("remark") or "") for token in ("两辆", "两趟合一趟", "合并为一辆")) for row in rows)
+            else "manual_pending"
+        ),
     }
 
     first_tonnages = sorted({item["key"] for item in catalogs["first"].get("tiers", [])} | {str(row["tonnage"]) for row in rows if row.get("price_kind") == "first"})
@@ -425,14 +407,109 @@ def build_final_reports(
     def previous_totals(path: Path | str | None, kind: str):
         label = "一干" if kind == "first" else "二干"
         if not path:
-            values, warning = read_previous_month_totals(None, kind, None)
-            return values, f"{label}{warning}" if warning else None
+            return None, f"上月{label}盈亏表（暂无数据）"
+        p = Path(path)
+        if not p.is_file():
+            return None, f"上月{label}盈亏表不存在: {p.name}"
         try:
-            previous_layout = discover_profit_template(path)
+            wb = load_workbook(p, read_only=False, data_only=True, keep_links=False)
         except Exception as exc:
-            return None, f"上月{label}盈亏表无法发现有效布局: {exc}"
-        values, warning = read_previous_month_totals(path, kind, previous_layout)
-        return values, f"{label}{warning}" if warning else None
+            return None, f"上月{label}盈亏表无法读取: {exc}"
+        try:
+            # 找上月的 sheet（不依赖 discover_profit_template，它可能返回错误的 sheet）
+            # 上月 = 目标月份 - 1
+            target_month = state.get("target_month", "")
+            try:
+                ty, tm = map(int, target_month.split("-"))
+                pm = tm - 1
+                py = ty
+                if pm == 0:
+                    pm = 12
+                    py -= 1
+            except:
+                pm = None
+
+            ws = None
+            if pm:
+                # 尝试多种格式："3月", "26年3月", "2026年3月"
+                for candidate in [f"{pm}月", f"{str(py)[2:]}年{pm}月", f"{py}年{pm}月"]:
+                    for sn in wb.sheetnames:
+                        if normalize_text(sn) == normalize_text(candidate):
+                            ws = wb[sn]
+                            break
+                    if ws:
+                        break
+            if ws is None:
+                # fallback: 用第一个有"合计"行的 sheet
+                for sn in wb.sheetnames:
+                    test_ws = wb[sn]
+                    for row in range(1, min(test_ws.max_row + 1, 100)):
+                        if normalize_text(test_ws.cell(row, 1).value) == "合计":
+                            ws = test_ws
+                            break
+                    if ws:
+                        break
+            if ws is None:
+                return None, f"上月{label}盈亏表找不到有效数据Sheet"
+
+            # 找合计行
+            total_row = None
+            for row in range(4, ws.max_row + 1):
+                if normalize_text(ws.cell(row, 1).value) == "合计":
+                    total_row = row
+                    break
+            if total_row is None:
+                return None, f"上月{label}盈亏表找不到合计行"
+
+            # 找汇总表头行（包含"委办运费"或"总盈亏"的行）
+            summary_header_row = None
+            for row in range(1, min(5, ws.max_row + 1)):
+                row_text = " ".join(normalize_text(ws.cell(row, c).value) for c in range(1, ws.max_column + 1))
+                if "委办运费" in row_text or "总盈亏" in row_text:
+                    summary_header_row = row
+                    break
+
+            field_map = {}
+            if summary_header_row:
+                for c in range(1, ws.max_column + 1):
+                    h = normalize_text(ws.cell(summary_header_row, c).value)
+                    if not h:
+                        continue
+                    if "趟次" in h:
+                        field_map["trips"] = c
+                    if "运费" in h:
+                        field_map["freight"] = c
+                    if "收入" in h:
+                        field_map["income"] = c
+                    if "盈亏" in h:
+                        field_map["pnl"] = c
+
+            def _num(col):
+                try:
+                    return float(ws.cell(total_row, col).value or 0)
+                except:
+                    return 0.0
+
+            trips = _num(field_map.get("trips", 0))
+            freight = _num(field_map.get("freight", 0))
+            income = _num(field_map.get("income", 0))
+            pnl = _num(field_map.get("pnl", 0))
+
+            # 运输量：扫描合计行，每7列一组的 col+1(装载量) 累加
+            load = 0.0
+            col = 2
+            while col + 6 <= ws.max_column:
+                l = _num(col + 1)
+                t = _num(col)
+                if t > 0:
+                    load += l
+                col += 7
+
+            return {"trips": trips, "load": load, "freight": freight, "income": income, "pnl": pnl}, None
+        except Exception as exc:
+            return None, f"上月{label}盈亏表解析失败: {exc}"
+        finally:
+            wb.close()
 
     prev_first, warn1 = previous_totals(previous_first_profit, "first")
     prev_second, warn2 = previous_totals(previous_second_profit, "second")
@@ -447,7 +524,7 @@ def build_final_reports(
     warnings = [
         item
         for item in state.get("warnings", [])
-        if not str(item).startswith(("财务记录未分类", "上月"))
+        if not str(item).startswith(("财务记录未分类", "上月", "官方特殊Sheet未自动填充"))
     ] + prev_warnings
     if finance_classification["unclassified"]:
         warnings.append(

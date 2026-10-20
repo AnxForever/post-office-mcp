@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 
 ALLOWED_SCRIPTS = {
     "build_model_summary": "build_model_summary.py",
+    "build_profit_tables": "build_profit_tables.py",
     "inspect_inputs": "inspect_inputs.py",
     "build_review_workbook": "build_review_workbook.py",
     "build_final_reports": "build_final_reports.py",

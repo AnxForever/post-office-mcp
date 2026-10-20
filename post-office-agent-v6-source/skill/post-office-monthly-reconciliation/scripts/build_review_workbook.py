@@ -20,6 +20,7 @@ from reconciliation.excel_io import (
 )
 from reconciliation.matching import (
     Issue,
+    _date_key,
     apply_settlement_tonnage,
     index_model_summary,
     match_price,
@@ -27,7 +28,7 @@ from reconciliation.matching import (
 )
 from reconciliation.integrity import PHASE_ONE_ASSETS, verify_state_files
 from reconciliation.model_summary import merge_online_rows, write_model_summary_workbook
-from reconciliation.normalize import normalize_plate, normalize_text
+from reconciliation.normalize import normalize_plate, normalize_text, normalize_trailer
 from reconciliation.templates import write_review_workbook
 from reconciliation.template_discovery import discover_draft_template
 
@@ -91,6 +92,32 @@ def _unmatched_issue(vehicle: Mapping[str, Any]) -> Issue:
     )
 
 
+def _data_missing_flag(vehicle: dict[str, Any], price: Any) -> str:
+    """数据缺失：公里、吨位、运价等无法从价格表获取"""
+    if price is not None:
+        if price.distance is None:
+            return "是"
+        if price.tonnage is None and price.freight is None:
+            return "是"
+    return "否"
+
+
+def _missing_location(vehicle: dict[str, Any], price: Any) -> str:
+    """缺失来源"""
+    if price is not None and price.distance is None:
+        return "价格表（无公里/运价）"
+    return ""
+
+
+def _online_orphan_issue(model: Mapping[str, Any]) -> Issue:
+    return Issue(
+        "vehicle_dispatch_missing",
+        "red",
+        f"在线表有测量记录但车管无对应派车数据：{model.get('measurement_date')} {model.get('plate')} {model.get('route') or ''}",
+        "核对是否漏录派车单，或确认该车为加车/临调后人工补充行信息",
+    )
+
+
 def _model_issues(model: Mapping[str, Any]) -> list[Issue]:
     note = model.get("zero_value_note")
     if note == "在线记录确认未测量":
@@ -120,10 +147,9 @@ def _format_review_remark(
     model_remark: Any,
     issues: list[Issue],
 ) -> str | None:
-    """只有有问题的行才写备注: 在线表原文 + 具体问题描述. 正常行不写."""
-    if not issues:
-        return None
-    original = normalize_text(model_problem)
+    """备注列留空，问题全部进问题汇总Sheet."""
+    return None
+    original = normalize_text(model_problem)  # unreachable, kept for reference
     if original and re.fullmatch(r"\d+(?:\.0+)?", original):
         n = int(float(original))
         original = f"{n}(疑似{n}轴车)"
@@ -188,6 +214,11 @@ def build_review_workbook(
     first_price_paths = _source_paths(state, "first_price")
     second_price_paths = _source_paths(state, "second_price")
     draft_template_paths = _source_paths(state, "draft_template")
+    # 模板优先用上传的，没有则用 skill 内置模板
+    if not draft_template_paths:
+        bundled = assets / "draft-template.xlsx"
+        if bundled.is_file():
+            draft_template_paths = [bundled]
     expected_vehicle_count = int(state.get("expected_role_counts", {}).get("vehicle", 6))
     if (
         len(caotan_paths) != 1
@@ -223,13 +254,16 @@ def build_review_workbook(
 
     review_rows: list[dict[str, Any]] = []
     model_matched = 0
+    matched_model_keys: set[tuple] = set()
     for vehicle in vehicle_rows:
         model = match_vehicle_row(vehicle, model_index)
         if model is not None:
             model_matched += 1
+            measurement_date = _date_key(model.get("measurement_date"))
+            plate = normalize_plate(model.get("plate"))
+            if measurement_date and plate:
+                matched_model_keys.add((measurement_date, plate))
         issues = _model_issues(model) if model is not None else [_unmatched_issue(vehicle)]
-        if model is not None and model.get("_cross_station"):
-            issues.append(Issue("cross_station", "blue", "串行：同车牌跨站点/跨日期取容积", "核对容积是否适用"))
         volume = model.get("measured_volume") if model is not None else None
         # Even when the vehicle has no model-summary match, resolve the route
         # with a zero volume. This preserves the official price-table distance
@@ -240,13 +274,6 @@ def build_review_workbook(
             catalogs,
             aliases,
         )
-        if price.kind in catalogs:
-            if model is not None:
-                price = apply_settlement_tonnage(
-                    price,
-                    vehicle.get("settlement_tonnage"),
-                    catalogs[price.kind],
-                )
         issues.extend(price.issues)
         source_id = _vehicle_source_id(vehicle, source_hashes)
         review_rows.append({
@@ -283,9 +310,67 @@ def build_review_workbook(
                 model.get("remark") if model is not None else None,
                 issues,
             ),
+            "vehicle_missing": "是" if model is None else "否",
+            "data_missing": "否" if model is None else _data_missing_flag(vehicle, price),
+            "missing_location": "" if model is None else _missing_location(vehicle, price),
             "issues": issues,
         })
     apply_cross_tonnage_flags(review_rows)
+
+    # 反向补充：在线表有测量记录但车管无派车数据的行
+    for model in model_summary_rows:
+        measurement_date = _date_key(model.get("measurement_date"))
+        plate = normalize_plate(model.get("plate"))
+        if not measurement_date or not plate:
+            continue
+        if (measurement_date, plate) in matched_model_keys:
+            continue
+        orphan_issues = [_online_orphan_issue(model)]
+        route = model.get("route")
+        price = match_price(route, model.get("measured_volume", 0), catalogs, aliases)
+        orphan_issues.extend(price.issues)
+        review_rows.append({
+            "source_id": f"ONLINE_ONLY:{model.get('source_file','')}:{model.get('source_sheet','')}:{model.get('source_row','')}",
+            "source_path": model.get("source_path", ""),
+            "source_file": model.get("source_file", ""),
+            "source_sheet": model.get("source_sheet", ""),
+            "source_row": model.get("source_row", ""),
+            "company": "在线测量（无派车记录）",
+            "dispatch_no": "",
+            "route": route,
+            "seal_time": model.get("measurement_date"),
+            "plate": model.get("plate"),
+            "trailer": model.get("trailer", "--"),
+            "plate_key": plate,
+            "trailer_key": normalize_trailer(model.get("trailer")),
+            "volume": model.get("measured_volume"),
+            "tonnage": price.tonnage if price is not None else None,
+            "model_tonnage": None,
+            "settlement_tonnage": None,
+            "distance": price.distance if price is not None else None,
+            "transport_volume": None,
+            "freight": price.freight if price is not None else None,
+            "standard_price": price.standard_price if price is not None else None,
+            "coefficient": price.coefficient if price is not None else None,
+            "price_kind": price.kind if price is not None else None,
+            "standard_route": price.route if price is not None else None,
+            "downgraded": False,
+            "original_coefficient": None,
+            "original_freight": None,
+            "price_difference": None,
+            "remark": None,
+            "vehicle_missing": "是",
+            "data_missing": "否",
+            "missing_location": "车管",
+            "issues": orphan_issues,
+        })
+
+    # 按日期+车牌排序：车管行在前，在线独有行在后
+    review_rows.sort(key=lambda r: (
+        r.get("seal_time") or date.min,
+        normalize_plate(r.get("plate") or ""),
+        0 if r.get("company") != "在线测量（无派车记录）" else 1,
+    ))
 
     model_summary_output = workspace_dir / f"{target_month}月_01_车型汇总表.xlsx"
     output = workspace_dir / f"{target_month}月_02_基础报表初版.xlsx"
@@ -302,6 +387,10 @@ def build_review_workbook(
     problem_count = sum(len(row.get("issues", [])) for row in review_rows)
     nonzero_selections = sum(
         row.get("measured_volume") not in (None, "", 0, 0.0)
+        for row in model_summary_rows
+    )
+    formula_recalculated = sum(
+        row.get("volume_method") == "dimensions_formula_fallback"
         for row in model_summary_rows
     )
     count = len(review_rows)
@@ -361,6 +450,7 @@ def build_review_workbook(
             "model_summary_unique_keys": len(model_summary_rows),
             "model_summary_nonzero_selections": nonzero_selections,
             "model_summary_all_zero": len(model_summary_rows) - nonzero_selections,
+            "formula_volume_recalculated": formula_recalculated,
             "authoritative_vehicle_rows": count,
             "model_summary_matched": model_matched,
             "model_summary_unmatched": count - model_matched,

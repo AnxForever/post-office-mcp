@@ -1,20 +1,30 @@
 {
   "name": "post-office-monthly-reconciliation",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "type": "bound",
   "description": "邮局月度委办运输报表预检、人工核对与最终交付",
   "scripts": {
-    "build-summary": {
+    "agentos_entrypoint": {
+      "file": "scripts/agentos_entrypoint.py",
+      "language": "python",
+      "description": "统一入口：根据 --phase 路由到 summary/review/final 等阶段"
+    },
+    "build_model_summary": {
       "file": "scripts/build_model_summary.py",
       "language": "python",
       "description": "仅用草滩和港务在线测量表生成车型汇总表"
     },
-    "run-workflow": {
+    "run_workflow": {
       "file": "scripts/run_workflow.py",
       "language": "python",
       "description": "执行 review/final 两阶段月度核对流程"
     },
-    "check-runtime": {
+    "build_profit_tables": {
+      "file": "scripts/build_profit_tables.py",
+      "language": "python",
+      "description": "从基础报表原版(一干汇总/二干基础)+财务收入表生成一干/二干盈亏表"
+    },
+    "check_runtime": {
       "file": "scripts/check_runtime.py",
       "language": "python",
       "description": "检查离线依赖、静态资产和工作区可写性"

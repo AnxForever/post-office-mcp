@@ -348,6 +348,110 @@ DOWNGRADE_HEADERS = [
     "原运费", "差价", "备注",
 ]
 
+SPECIAL_HEADERS = {
+    "二干基础": [
+        "序号", "车辆承运单位", "派车单号", "邮路名称", "邮路名称", "路单编号", "封车时间", None,
+        "车牌号", None, "容间", "吨位", "公里", "运输量", "路单号", "运价", "标准价", "备注", None,
+    ],
+    "一干汇总": [
+        "序号", "车辆承运单位", "派车单号", "邮路名称", "路单编号", "封车时间", None, "车牌号", None,
+        "容间", "吨位", "公里", "运输量", "路单号", "运价（保留两位数）", "标准价", "运价", "备注",
+    ],
+    "两趟合一趟": [
+        "序号", "车辆承运单位", "派车单号", "邮路名称", "路单编号", "封车时间", None, "车牌号", None,
+        "容间", "吨位", "公里", "运输量", "路单号", "运价", "标准价", "备注", None,
+    ],
+}
+
+
+def _special_row_values(row: dict[str, Any], index: int, headers: list[Any], *, two_trip: bool = False) -> list[Any]:
+    """Map a corrected review row into an official special-sheet layout."""
+    values: list[Any] = []
+    seen_route = 0
+    for column, header in enumerate(headers, 1):
+        text = str(header or "")
+        if text == "序号":
+            value = index
+        elif text == "车辆承运单位":
+            value = row.get("company")
+        elif text == "派车单号":
+            value = row.get("dispatch_no")
+        elif text == "邮路名称":
+            seen_route += 1
+            value = row.get("route") if seen_route == 1 else (row.get("standard_route") or row.get("route"))
+        elif text == "封车时间":
+            value = row.get("seal_time")
+        elif text == "车牌号":
+            value = row.get("plate")
+        elif text == "容间":
+            try:
+                value = int(round(float(row["volume"]))) if row.get("volume") not in (None, "") else None
+            except (TypeError, ValueError):
+                value = None
+        elif text == "吨位":
+            value = row.get("tonnage")
+        elif text == "公里":
+            value = row.get("distance")
+        elif text == "运输量":
+            value = row.get("transport_volume")
+        elif text == "运价（保留两位数）":
+            value = round(float(row["freight"]), 2) if row.get("freight") not in (None, "") else None
+        elif text == "运价":
+            value = row.get("freight")
+        elif text == "标准价":
+            value = row.get("standard_price")
+        elif text == "备注":
+            value = row.get("remark")
+        elif two_trip and column == len(headers):
+            # The official two-trip tab uses the trailing blank column for the
+            # per-vehicle unit price used by the manual merge calculation.
+            value = row.get("standard_price")
+        else:
+            value = None
+        values.append(value)
+    return values
+
+
+def _write_special_sheet(
+    workbook: Workbook,
+    name: str,
+    rows: list[dict[str, Any]],
+    *,
+    style_source: Any,
+    two_trip: bool = False,
+) -> int:
+    if name not in workbook.sheetnames:
+        return 0
+    ws = workbook[name]
+    headers = SPECIAL_HEADERS[name]
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+    if ws.max_row > 1:
+        ws.delete_rows(2, ws.max_row - 1)
+    for column, header in enumerate(headers, 1):
+        target = ws.cell(1, column, header)
+        if style_source is not None and column <= style_source.max_column:
+            _copy_cell_style(style_source.cell(1, column), target)
+    row_style = []
+    for column in range(1, len(headers) + 1):
+        if style_source is not None and style_source.max_row >= 2 and column <= style_source.max_column:
+            row_style.append(copy(style_source.cell(2, column)._style))
+        else:
+            row_style.append(None)
+    for index, row in enumerate(rows, 1):
+        values = _special_row_values(row, index, headers, two_trip=two_trip)
+        for column, value in enumerate(values, 1):
+            cell = ws.cell(index + 1, column, value)
+            if row_style[column - 1] is not None:
+                cell._style = copy(row_style[column - 1])
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    if rows:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+    else:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+    return len(rows)
+
 
 def _write_downgrade_sheet(workbook: Workbook, rows: list[dict[str, Any]]) -> int:
     downgrade_rows = [row for row in rows if row.get("downgraded")]
@@ -481,6 +585,16 @@ def write_split_workbook(
                 ws.cell(total_row, column, f"=SUM({letter}2:{letter}{total_row-1})")
         ws.auto_filter.ref = f"A1:{get_column_letter(max_column)}{total_row}"
         _reset_split_sheet_display(ws, total_row)
+    style_source = wb[writable_sheets[0]] if writable_sheets else None
+    first_rows = [row for row in rows if row.get("price_kind") == "first"]
+    second_rows = [row for row in rows if row.get("price_kind") == "second"]
+    two_trip_rows = [
+        row for row in rows
+        if any(token in str(row.get("remark") or "") for token in ("两辆", "两趟合一趟", "合并为一辆"))
+    ]
+    _write_special_sheet(wb, "二干基础", second_rows, style_source=style_source)
+    _write_special_sheet(wb, "一干汇总", first_rows, style_source=style_source)
+    _write_special_sheet(wb, "两趟合一趟", two_trip_rows, style_source=style_source, two_trip=True)
     _write_downgrade_sheet(wb, rows)
     for ws in wb.worksheets:
         ws.sheet_view.topLeftCell = "A1"

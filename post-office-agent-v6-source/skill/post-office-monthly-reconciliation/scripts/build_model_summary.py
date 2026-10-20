@@ -35,6 +35,10 @@ def build_model_summary(
     output = output_root / f"{parsed.month}月_01_车型汇总表.xlsx"
     write_model_summary_workbook(summary_rows, output, target_month)
     nonzero = sum(row.get("measured_volume") not in (None, "", 0, 0.0) for row in summary_rows)
+    formula_recalculated = sum(
+        row.get("volume_method") == "dimensions_formula_fallback"
+        for row in summary_rows
+    )
     return {
         "ok": True,
         "phase": "summary_completed",
@@ -45,6 +49,7 @@ def build_model_summary(
             "summary_rows": len(summary_rows),
             "nonzero_volume": nonzero,
             "unmeasured_or_inconsistent": len(summary_rows) - nonzero,
+            "formula_volume_recalculated": formula_recalculated,
         },
         "sha256": file_sha256(output),
         "next_action": "如需完整月度报表，请提供全部当月输入并执行 review 阶段",

@@ -22,6 +22,11 @@ import openpyxl
 from openpyxl.styles import Font, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+from _paths import require_dir, require_file, resolve_out, save_workbook
+
 WANYUAN = '0"."0,"万元"'
 REPORT_YEAR = int(os.environ.get('POST_OFFICE_REPORT_YEAR', '2026'))
 
@@ -47,8 +52,8 @@ def _find_col(ws, hrow, keywords):
         if any(kw in h for kw in keywords): return c
     return None
 
-def month_template_sheet(wb):
-    """选工作簿中最后一个有效月份 Sheet（例如 26年3月），不取 Sheet1 等辅助页。"""
+def month_template_sheet(wb, target_month=None):
+    """选工作簿中最新的有效月份 Sheet(优先含"年"的新格式, 如 26年3月)。"""
     candidates = []
     for sn in wb.sheetnames:
         if not re.match(r'^(?:\d{2}年)?\d+月$', sn):
@@ -57,15 +62,17 @@ def month_template_sheet(wb):
         if str(ws.cell(row=2, column=1).value or '').strip() == '邮路名称':
             candidates.append(sn)
     if not candidates:
-        raise ValueError('盈亏模板中未找到有效月份 Sheet（Row2 Col1 应为“邮路名称”）')
-    return candidates[-1]
+        raise ValueError('盈亏模板中未找到有效月份 Sheet（Row2 Col1 应为"邮路名称"）')
+    # 优先选含"年"的新格式Sheet(如 26年3月, 车型组名与价格表一致), 其次取最后一个
+    new_fmt = [s for s in candidates if re.match(r'\d{2}年', s)]
+    return new_fmt[-1] if new_fmt else candidates[-1]
 
 
-def parse_template(path):
-    """读取最近月份模板的车型组、路线顺序、汇总区和环比区。"""
+def parse_template(path, target_month=None):
+    """读取模板的车型组、路线顺序、汇总区和环比区。target_month 指定目标月份以匹配对应 Sheet。"""
     wb = openpyxl.load_workbook(path, data_only=False)
     wb_values = openpyxl.load_workbook(path, data_only=True)
-    sn = month_template_sheet(wb)
+    sn = month_template_sheet(wb, target_month)
     ws = wb[sn]; ws_values = wb_values[sn]
     group_starts = []
     summary_start = None
@@ -80,15 +87,21 @@ def parse_template(path):
     for i, (start, name) in enumerate(group_starts):
         end = group_starts[i+1][0] if i+1 < len(group_starts) else summary_start
         if end - start != 7:
-            raise ValueError(f'{path} / {sn} 车型组“{name}”不是 7 列')
+            raise ValueError(f'{path} / {sn} 车型组"{name}"不是 7 列')
     ton_keys = []
     for _, name in group_starts:
-        m = re.search(r'(\d+\.?\d*)', name)
-        if not m:
-            raise ValueError(f'{path} / {sn} 无法从车型组“{name}”解析吨位')
-        num = m.group(1)
-        suffix_match = re.search(r'([A-B])', name)
-        suffix = suffix_match.group(1) if suffix_match else ''
+        # 提取吨位: "12"→"12吨", "40A"→"40吨A", "7.5米 45方 8吨"→"8吨"
+        m_ton = re.search(r'(\d+\.?\d*)\s*吨', name)
+        if m_ton:
+            num = m_ton.group(1)
+        else:
+            m_num = re.search(r'(\d+\.?\d*)', name)
+            if not m_num:
+                raise ValueError(f'{path} / {sn} 无法从车型组"\'{name}\'"解析吨位')
+            num = m_num.group(1)
+        suffix = ''
+        m_suf = re.search(r'吨?\s*([A-B])', name)
+        if m_suf: suffix = m_suf.group(1)
         ton_keys.append(f'{num}吨{suffix}'.rstrip())
     total_row = next((r for r in range(4, ws.max_row + 1) if str(ws.cell(r, 1).value or '').strip() == '合计'), None)
     if total_row is None:
@@ -243,17 +256,20 @@ def copy_cell_style(src, dst):
 def main():
     if len(sys.argv) < 6:
         print(__doc__); sys.exit(1)
-    M = int(sys.argv[1]); OUT = sys.argv[2]
-    DRAFT = sys.argv[3]; FIN_REVENUE = sys.argv[4]; PNL_DIR = sys.argv[5]
-    os.makedirs(OUT, exist_ok=True)
+    M = int(sys.argv[1]); OUT = str(resolve_out(sys.argv[2]))
+    DRAFT = str(require_file(sys.argv[3], '核对后初版'))
+    FIN_REVENUE = str(require_file(sys.argv[4], '财务收入表'))
+    PNL_DIR = str(require_dir(sys.argv[5], '盈亏模板目录'))
+    require_file(os.path.join(PNL_DIR, '一干委办盈亏.xlsx'), '一干盈亏模板')
+    require_file(os.path.join(PNL_DIR, '二干委办盈亏.xlsx'), '二干盈亏模板')
 
     B = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
     print("读取修正后初版 + 财务表...")
     templates = {
-        '一干': parse_template(f"{PNL_DIR}/一干委办盈亏.xlsx"),
-        '二干': parse_template(f"{PNL_DIR}/二干委办盈亏.xlsx"),
+        '一干': parse_template(f"{PNL_DIR}/一干委办盈亏.xlsx", M),
+        '二干': parse_template(f"{PNL_DIR}/二干委办盈亏.xlsx", M),
     }
     print(f"  [模板] 一干={templates['一干']['sheet']} 车型组={templates['一干']['ton_keys']}")
     print(f"  [模板] 二干={templates['二干']['sheet']} 车型组={templates['二干']['ton_keys']}")
@@ -261,7 +277,7 @@ def main():
     fin = load_fin(FIN_REVENUE, templates['一干']['ton_keys'], templates['二干']['ton_keys'])
     print(f"  初版聚合键={len(basic_sum)} 财务聚合键={len(fin)} 未归类路线={len(unresolved)}")
     if unresolved:
-        print("  [!]️ 未在一/二干最新模板中唯一归类的路线（未灌入盈亏表）:")
+        print("  [!] 未在一/二干最新模板中唯一归类的路线（未灌入盈亏表）:")
         for route in unresolved[:20]:
             print(f"    - {route}")
 
@@ -276,32 +292,41 @@ def main():
         group_ton_keys = tpl['ton_keys']
 
         wb_o = openpyxl.Workbook(); ws_o = wb_o.active; ws_o.title = f"{REPORT_YEAR % 100}年{M}月"
+        ws_o.sheet_view.zoomScale = 85  # 官方22%缩放→我们85%+小字号
+
         ws_o.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
         c = ws_o.cell(row=1, column=1, value=f'{REPORT_YEAR}年{M}月{level}委办运输盈亏情况')
-        copy_cell_style(ws_std.cell(1, 1), c)
-        if not c.has_style:
-            c.font = Font(name='宋体', bold=True, size=48); c.alignment = ALIGN
+        c.font = Font(name='宋体', bold=True, size=14); c.alignment = Alignment(horizontal='center', vertical='center')
+        ws_o.row_dimensions[1].height = 30
 
         ws_o.merge_cells(start_row=2, start_column=1, end_row=3, end_column=1)
-        c = ws_o.cell(row=2, column=1, value='邮路名称'); copy_cell_style(ws_std.cell(2, 1), c)
-        for gi, (sc, name) in enumerate(veh_groups):
+        c = ws_o.cell(row=2, column=1, value='邮路名称')
+        c.font = Font(name='宋体', size=10); c.alignment = Alignment(horizontal='center', vertical='center')
+        for gi, (sc, _name) in enumerate(veh_groups):
             ws_o.merge_cells(start_row=2, start_column=2+gi*7, end_row=2, end_column=2+gi*7+6)
-            c = ws_o.cell(row=2, column=2+gi*7, value=name); copy_cell_style(ws_std.cell(2, sc), c)
+            c = ws_o.cell(row=2, column=2+gi*7, value=group_ton_keys[gi])
+            c.font = Font(name='宋体', bold=True, size=10); c.alignment = Alignment(horizontal='center', vertical='center')
+        ws_o.row_dimensions[2].height = 20
         summary_labels = [ws_std.cell(row=2, column=summary_start+j).value for j in range(4)]
         for j, label in enumerate(summary_labels):
             ws_o.merge_cells(start_row=2, start_column=summary_start+j, end_row=3, end_column=summary_start+j)
-            c = ws_o.cell(row=2, column=summary_start+j, value=label); copy_cell_style(ws_std.cell(2, summary_start+j), c)
+            c = ws_o.cell(row=2, column=summary_start+j, value=label)
+            c.font = Font(name='宋体', bold=True, size=10); c.alignment = Alignment(horizontal='center', vertical='center')
 
         for gi in range(n_groups):
             src_start = veh_groups[gi][0]
             for j in range(7):
                 s = ws_std.cell(row=3, column=src_start+j).value
-                c = ws_o.cell(row=3, column=2+gi*7+j, value=s); copy_cell_style(ws_std.cell(3, src_start+j), c)
+                c = ws_o.cell(row=3, column=2+gi*7+j, value=s)
+                c.font = Font(name='宋体', size=10); c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                c.border = B
 
         row = 4
         totals = {k:{'trips':0,'transport':0,'freight':0,'settle':0,'pnl':0} for k in group_ton_keys}
         for route_name in route_order:
-            c = ws_o.cell(row=row, column=1, value=route_name); copy_cell_style(ws_std.cell(4, 1), c)
+            display_name = route_name.replace('西安-', '', 1) if not is_yg else route_name
+            c = ws_o.cell(row=row, column=1, value=display_name)
+            c.font = Font(name='宋体', size=10); c.border = B; c.alignment = Alignment(vertical='center')
             for gi, ton_key in enumerate(group_ton_keys):
                 route_key = std(route_name)
                 fk = (is_yg, route_key, ton_key)
@@ -311,47 +336,47 @@ def main():
                 if trips > 0 and freight > 0:
                     filled.append((level, route_name, ton_key, trips, round(net_settle,2), round(freight,2)))
                 sc2 = 2+gi*7
-                for j, v in enumerate([trips, round(transport), round(avg_load,1), round(freight,2), round(net_settle,2), round(pnl,2), round(avg_pnl,2)]):
+                for j, v in enumerate([trips or None, round(transport) if transport>0 else None, round(avg_load,1) if avg_load>0 else None, round(freight,2) if freight>0 else None, round(net_settle,2) if net_settle!=0 else None, round(pnl,2) if pnl!=0 else None, round(avg_pnl,2) if avg_pnl!=0 else None]):
                     cc = ws_o.cell(row=row, column=sc2+j, value=v)
-                    copy_cell_style(ws_std.cell(4, veh_groups[gi][0]+j), cc)
-                    if j == 0: cc.number_format = '0_ '
+                    cc.font = Font(name='宋体', size=10); cc.border = B; cc.alignment = Alignment(vertical='center')
                 for k in totals[ton_key]: totals[ton_key][k] += {'trips':trips,'transport':transport,'freight':freight,'settle':net_settle,'pnl':pnl}[k]
 
             vt = [2+gi*7 for gi in range(n_groups)]; vf = [2+gi*7+3 for gi in range(n_groups)]; vs = [2+gi*7+4 for gi in range(n_groups)]
-            for j, (cols, fmt) in enumerate([(vt, None), (vf, WANYUAN), (vs, WANYUAN)]):
+            for j, cols in enumerate([vt, vf, vs]):
                 col = summary_start+j; formula = '=' + '+'.join([f'{get_column_letter(cc)}{row}' for cc in cols])
-                cc = ws_o.cell(row=row, column=col, value=formula); copy_cell_style(ws_std.cell(4, col), cc)
-                if fmt: cc.number_format = fmt
+                cc = ws_o.cell(row=row, column=col, value=formula)
+                cc.font = Font(name='宋体', size=10); cc.border = B; cc.alignment = Alignment(vertical='center')
             cc = ws_o.cell(row=row, column=summary_start+3, value=f'={get_column_letter(summary_start+2)}{row}-{get_column_letter(summary_start+1)}{row}')
-            copy_cell_style(ws_std.cell(4, summary_start+3), cc); cc.number_format = WANYUAN
+            cc.font = Font(name='宋体', size=10); cc.border = B; cc.alignment = Alignment(vertical='center')
             row += 1
 
-        c = ws_o.cell(row=row, column=1, value='合计'); copy_cell_style(ws_std.cell(tpl['total_row'], 1), c)
+        c = ws_o.cell(row=row, column=1, value='合计')
+        c.font = Font(name='宋体', bold=True, size=10); c.border = B; c.alignment = Alignment(vertical='center')
         for gi, ton_key in enumerate(group_ton_keys):
             t = totals[ton_key]; sc2 = 2+gi*7
             al = t['transport']/t['trips'] if t['trips']>0 else 0; ap = t['pnl']/t['trips'] if t['trips']>0 else 0
             for j, v in enumerate([t['trips'], round(t['transport']), round(al,1), round(t['freight'],2), round(t['settle'],2), round(t['pnl'],2), round(ap,2)]):
                 cc = ws_o.cell(row=row, column=sc2+j, value=v)
-                copy_cell_style(ws_std.cell(tpl['total_row'], veh_groups[gi][0]+j), cc)
-                if j == 0: cc.number_format = '0_ '
+                cc.font = Font(name='宋体', size=10); cc.border = B; cc.alignment = Alignment(vertical='center')
         for j, label in enumerate(['trips','freight','settle','pnl']):
             col = summary_start+j
             if label == 'pnl':
                 formula = f'={get_column_letter(summary_start+2)}{row}-{get_column_letter(summary_start+1)}{row}'
             else:
                 formula = f'=SUM({get_column_letter(col)}{4}:{get_column_letter(col)}{row-1})'
-            cc = ws_o.cell(row=row, column=col, value=formula); copy_cell_style(ws_std.cell(tpl['total_row'], col), cc)
-            if j >= 1: cc.number_format = WANYUAN
+            cc = ws_o.cell(row=row, column=col, value=formula)
+            cc.font = Font(name='宋体', size=10); cc.border = B; cc.alignment = Alignment(vertical='center')
 
-        # 底部环比区：上月取最近模板“本月”行，本月取本次汇总，公式按官方格式。
+        # 底部环比区：上月取最近模板"本月"行，本月取本次汇总，公式按官方格式。
         compare = tpl['compare']
         if compare:
             header_row = row + compare['offset']
             prev_row, curr_row, mom_row = header_row + 1, header_row + 2, header_row + 3
             src_header, src_prev, src_curr, src_mom = compare['style_rows']
             for cidx in range(1, 7):
-                c = ws_o.cell(header_row, cidx, value=compare['headers'][cidx-1]); copy_cell_style(ws_std.cell(src_header, cidx), c)
-            ws_o.cell(prev_row, 1, value=compare['previous_label'])
+                c = ws_o.cell(header_row, cidx, value=compare['headers'][cidx-1])
+                c.font = Font(name='宋体', size=9); c.border = B; c.alignment = Alignment(horizontal='center', vertical='center')
+            ws_o.cell(prev_row, 1, value=compare['previous_label']).font = Font(name='宋体', size=10)
             current_values = [
                 sum(t['trips'] for t in totals.values()),
                 round(sum(t['transport'] for t in totals.values())),
@@ -359,29 +384,29 @@ def main():
                 round(sum(t['settle'] for t in totals.values()), 2),
                 round(sum(t['pnl'] for t in totals.values()), 2),
             ]
-            for cidx in range(1, 7):
-                copy_cell_style(ws_std.cell(src_prev, cidx), ws_o.cell(prev_row, cidx))
-                copy_cell_style(ws_std.cell(src_curr, cidx), ws_o.cell(curr_row, cidx))
-                copy_cell_style(ws_std.cell(src_mom, cidx), ws_o.cell(mom_row, cidx))
             for cidx, value in enumerate(compare['previous_values'], 2):
-                ws_o.cell(prev_row, cidx, value=value)
-            ws_o.cell(curr_row, 1, value=f'{M}月')
+                c = ws_o.cell(prev_row, cidx, value=value)
+                c.font = Font(name='宋体', size=10); c.border = B; c.alignment = Alignment(vertical='center')
+            c = ws_o.cell(curr_row, 1, value=f'{M}月'); c.font = Font(name='宋体', size=10); c.border = B
             for cidx, value in enumerate(current_values, 2):
-                ws_o.cell(curr_row, cidx, value=value)
-            ws_o.cell(mom_row, 1, value='环比')
+                c = ws_o.cell(curr_row, cidx, value=value)
+                c.font = Font(name='宋体', size=10); c.border = B; c.alignment = Alignment(vertical='center')
+            c = ws_o.cell(mom_row, 1, value='环比'); c.font = Font(name='宋体', size=10); c.border = B
             for cidx in range(2, 7):
                 letter = get_column_letter(cidx)
-                ws_o.cell(mom_row, cidx, value=f'=({letter}{curr_row}-{letter}{prev_row})/{letter}{prev_row}')
+                c = ws_o.cell(mom_row, cidx, value=f'=({letter}{curr_row}-{letter}{prev_row})/{letter}{prev_row}')
+                c.font = Font(name='宋体', size=10); c.border = B; c.alignment = Alignment(vertical='center')
 
         for col in range(1, ncols+1):
-            letter = get_column_letter(col); src_w = ws_std.column_dimensions[letter].width
-            if src_w: ws_o.column_dimensions[letter].width = src_w
+            letter = get_column_letter(col)
+            ws_o.column_dimensions[letter].width = 18 if col == 1 else 13
         last_row = mom_row if compare else row
+        ws_o.row_dimensions[3].height = 22  # 子表头行高
+        for r in range(4, row): ws_o.row_dimensions[r].height = 18  # 数据行高
         for r in range(2, last_row+1):
             for c in range(1, ncols+1): ws_o.cell(row=r, column=c).border = B
         fname = f'{OUT}/{M}月_04_{level}盈亏表.xlsx'
-        wb_o.save(fname); wb_o.close()
-        print(f'  [OK] {fname}')
+        fname = save_workbook(wb_o, fname)
 
     for tpl in templates.values():
         tpl['workbook'].close(); tpl['values_workbook'].close()
@@ -389,7 +414,7 @@ def main():
     # ===== 抽样验证：从「模板内实际落数」的行里抽 3 条对账 =====
     print("\n[验证] 从盈亏表实际落数行抽 3 条对账（趟次/结算收入/运费均应>0）...")
     if not filled:
-        print("  [!]️ 盈亏表零落数！请查：路线标准化 / 吨位映射 / 一二干判定")
+        print("  [!] 盈亏表零落数！请查：路线标准化 / 吨位映射 / 一二干判定")
     else:
         idxs = sorted(set([0, len(filled)//2, len(filled)-1]))
         all_ok = True
@@ -398,7 +423,7 @@ def main():
             ok = trips > 0 and settle != 0 and freight > 0
             all_ok = all_ok and ok
             print(f"  [{level}] {rt} {ton}: 趟次={trips} 结算收入={settle} 运费={freight} => {'PASS' if ok else 'FAIL'}")
-        print(f"  覆盖：{len(filled)} 个(路线×吨位)落数 | " + ("[OK] 抽样通过" if all_ok else "[!]️ 有空值需核对"))
+        print(f"  覆盖：{len(filled)} 个(路线×吨位)落数 | " + ("[OK] 抽样通过" if all_ok else "[!] 有空值需核对"))
 
 
 if __name__ == "__main__":

@@ -6,12 +6,12 @@ import re
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from openpyxl import load_workbook
-from openpyxl.utils.cell import column_index_from_string
+from openpyxl.utils.cell import column_index_from_string, get_column_letter
 
 from .normalize import (
     normalize_dispatch_no,
@@ -286,11 +286,29 @@ def _value(row: Sequence[Any], field_map: Mapping[str, int], key: str) -> Any:
     return row[column - 1] if column and column <= len(row) else None
 
 
+def _rounded_volume(value: Any) -> int | None:
+    try:
+        number = Decimal(str(value).replace(",", ""))
+    except (InvalidOperation, ValueError):
+        return None
+    return int(number.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 def _record_from_model_row(row: Sequence[Any], field_map: Mapping[str, int], source_row: int, source_sheet: str) -> dict[str, Any]:
     length, width, height = (_to_number(_value(row, field_map, key)) for key in ("length", "width", "height"))
-    volume = _to_number(_value(row, field_map, "volume"))
-    if volume is None and all(item is not None for item in (length, width, height)):
-        volume = float(length) * float(width) * float(height)
+    raw_volume = _value(row, field_map, "volume")
+    numeric_volume = _to_number(raw_volume)
+    volume_formula = raw_volume if isinstance(raw_volume, str) and raw_volume.lstrip().startswith("=") else None
+    unrounded_volume: Decimal | None = None
+    volume_method = "missing"
+    if numeric_volume is not None:
+        unrounded_volume = Decimal(str(numeric_volume))
+        volume_method = "source_value_rounded"
+    elif all(item is not None for item in (length, width, height)):
+        unrounded_volume = Decimal(str(length)) * Decimal(str(width)) * Decimal(str(height))
+        volume_method = "dimensions_formula_fallback" if volume_formula else "dimensions_fallback"
+    volume = _rounded_volume(unrounded_volume)
+    volume_column = field_map.get("volume")
     plate = normalize_plate(_value(row, field_map, "plate"))
     trailer = normalize_trailer(_value(row, field_map, "trailer"))
     return {
@@ -307,6 +325,10 @@ def _record_from_model_row(row: Sequence[Any], field_map: Mapping[str, int], sou
         "height": height,
         "volume": volume,
         "measured_volume": volume,
+        "volume_unrounded": float(unrounded_volume) if unrounded_volume is not None else None,
+        "volume_method": volume_method,
+        "volume_formula": volume_formula,
+        "volume_cell": f"{get_column_letter(volume_column)}{source_row}" if volume_column else None,
         "problem": _value(row, field_map, "problem"),
         "remark": _value(row, field_map, "remark"),
     }

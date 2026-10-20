@@ -25,6 +25,7 @@ REQUIRED_REFERENCES = (
 REQUIRED_SCRIPTS = (
     "agentos_runner.py",
     "build_model_summary.py",
+    "build_profit_tables.py",
     "check_runtime.py",
     "run_workflow.py",
     "inspect_inputs.py",

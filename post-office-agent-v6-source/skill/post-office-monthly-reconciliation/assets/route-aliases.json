@@ -24,6 +24,43 @@
     "西安草滩-湛江": {
       "standard_route": "西安草滩-湛江",
       "price_kind": "first"
+    },
+    "西安-湛江(陕1)": {
+      "standard_route": "西安-湛江",
+      "price_kind": "first"
+    },
+    "西安草滩-湛江(陕串1)": {
+      "standard_route": "西安草滩-湛江",
+      "price_kind": "first"
+    },
+    "西安-固原(港1)": {
+      "standard_route": "西安-固原",
+      "price_kind": "first"
+    },
+    "西安-固原(港T串1)": {
+      "standard_route": "西安-固原",
+      "price_kind": "first"
+    },
+    "西安-平凉(陕T1)": {
+      "standard_route": "西安-平凉",
+      "price_kind": "first"
+    },
+    "西安航站-天水(陕1)": {
+      "standard_route": "西安-天水",
+      "price_kind": "first"
+    },
+    "西安航站-庆阳(陕1)": {
+      "standard_route": "西安-庆阳",
+      "price_kind": "first"
+    },
+    "西安-陇南(陕T1)": {
+      "standard_route": "西安-陇南",
+      "price_kind": "second",
+      "price_source": "first"
+    },
+    "西安-太原(陕T1)": {
+      "standard_route": "西安-太原",
+      "price_kind": "first"
     }
   }
 }
