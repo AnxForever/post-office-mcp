@@ -9,11 +9,11 @@
   版式               <- 照搬盈亏模板（车型组、路线顺序、7列分组、汇总4列、上月/本月/环比）
 
 关键业务口径：
-  1. 财务表「流水号」前 4 位就是日期（MMDD），通常比派车日晚一天（次日结算）。
-     **跨月记录按「是否出现在本月财务表」判定，不看流水号日期**：只要该行在当月
-     运输局表里就属于当月。车牌本月无派车记录、无法逐趟配对时，按邮路名称归到
+  1. 财务收入表「流水号」前 4 位就是日期（MMDD），通常比派车日晚一天（次日结算）。
+     **跨月记录按「是否出现在本月财务收入表」判定，不看流水号日期**：只要该行在当月
+     财务收入表里就属于当月。车牌本月无派车记录、无法逐趟配对时，按邮路名称归到
      该路线现有最高吨位档。
-  2. 往返路线在财务表拆成「去程」「返程」两条，只取去程，否则同一趟重复计入。
+  2. 往返路线在财务收入表拆成「去程」「返程」两条，只取去程，否则同一趟重复计入。
   3. 价格表会调档（如二干最小档 2.75 吨 -> 3 吨），吨位按对数距离归并到最近的模板档，
      表头显示当月实际档位名。
   4. 两趟合一趟、降吨位等特殊 Sheet 的记录已包含在一干汇总/二干基础内，不重复统计。
@@ -82,7 +82,7 @@ def normalize_route(route) -> str:
 
 
 def month_day(value) -> str:
-    """封车时间 -> MMDD（用于和财务表流水号前 4 位对齐）。"""
+    """封车时间 -> MMDD（用于和财务收入表流水号前 4 位对齐）。"""
     text = str(value or "")
     if isinstance(value, datetime):
         return f"{value.month:02d}{value.day:02d}"
@@ -157,12 +157,12 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict]:
 
 
 def _read_finance(finance_path: Path) -> tuple[dict, dict, dict]:
-    """财务表（运输局表）-> 委办行按 (车牌, MMDD) 索引，同时保留按车牌索引。
+    """财务收入表-> 委办行按 (车牌, MMDD) 索引，同时保留按车牌索引。
 
     只取「车牌号 + 流水号 + 结算收入 + 普服收入 + 邮路名称 + 邮路级别 + 自委办」。
-    财务表里的「额定吨位」「实载重量（吨）」一律不读：
+    财务收入表里的「额定吨位」「实载重量（吨）」一律不读：
       - 额定吨位是录入的车型口径，与基础报表的实际吨位档经常不一致
-        （例：西安草滩-内江 运输局写 20，基础报表是 30）；吨位一律以基础报表为准。
+        （例：西安草滩-内江 财务收入表写 20，基础报表是 30）；吨位一律以基础报表为准。
       - 实载重量是每趟实际装货量（0~21 吨），不是车辆吨位档，不能用来分档。
 
     第三个返回值是「反向路线」行：`银川-西安`、`榆林-西安` 这类不参与逐趟配对
@@ -207,7 +207,7 @@ def _read_finance(finance_path: Path) -> tuple[dict, dict, dict]:
 def allocate_income(trips: list[dict], exact: dict, by_plate: dict, year: int, max_gap_days: int = 7):
     """逐趟分配结算收入，返回 (income[(level,route,ton)], 匹配统计, 未匹配明细)。
 
-    分配按车牌分组、一对一进行：同车牌本月可能派多趟，而财务表里对应几条记录。
+    分配按车牌分组、一对一进行：同车牌本月可能派多趟，而财务收入表里对应几条记录。
     先按 (车牌, MMDD) 精确配对；剩下的再按日期 GAP 贪心配对（每趟最多用一条记录，
     每条记录最多给一趟），避免同一条财务记录被多趟重复计入。
     """
@@ -810,7 +810,7 @@ def main(argv=None) -> int:
     trip_income = _trip_level_income(trips, exact, by_plate, year)
     income = _bucket_income(trips, trip_income)
     income = _apply_reverse_income(income, trips, reverse_income)
-    # 孤儿记录：运输局里已出现、就按当月计入（不看流水号日期），无法逐趟配对的
+    # 孤儿记录：财务收入表里已出现、就按当月计入（不看流水号日期），无法逐趟配对的
     #            按其路线归到该路线现有最高吨位档。
     plates_in_base = {t["plate"] for t in trips}
     for plate, entries in by_plate.items():
@@ -837,7 +837,7 @@ def main(argv=None) -> int:
         "month": args.month,
         "basis": "source-data-first",
         "tonnage_source": "基础报表原版（一干汇总/二干基础）的吨位列",
-        "income_source": "运输局表 结算收入-普服收入（额定吨位/实载重量不参与分档）",
+        "income_source": "财务收入表 结算收入-普服收入（额定吨位/实载重量不参与分档）",
         "detail_rows": len(trips),
         "income_match": stats,
         "reverse_income": {k: round(v, 2) for k, v in reverse_income.items()},

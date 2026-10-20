@@ -56,7 +56,7 @@ def build_agent_json(files: list[Path]) -> dict[str, object]:
             "name": "邮局月度委办运输报表核对 V6.0",
             "description": "通过受控 Skill 执行月度预检、人工核对和报表交付：车型汇总表 → 基础报表初版 → 人工闸门 → 拆分版 → 盈亏表",
             "icon": "[PO]",
-            "version": "6.1.0",
+            "version": "6.1.1",
             "category": "财务分析",
             "type": "general",
             "skills": [SKILL_NAME],

@@ -131,6 +131,9 @@ sys.argv = [
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/build_profit_tables.py", run_name="__main__")
 ```
 
+> `--finance` 传的是**财务收入表**。客户有时把它命名为 `2026.08运输局.xlsx`，
+> 有时叫 `2026.03财务收入表.xlsx`，两者是同一张表（31 列、Sheet 名 `sheet1`），按内容识别即可。
+
 该脚本的口径（详见 [reconciliation-rules.md](references/reconciliation-rules.md) 的「盈亏表」一节）：
 
 - 趟次 / 装载量 / 运费来自“一干汇总”“二干基础”，**行数与这两个 sheet 完全守恒**。
@@ -139,7 +142,7 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/bui
   归类为 30 吨档；没有备注时按该车在该路线跑过的最低吨位档归类。
   基础报表的 `吨位` 列是车辆车型档，不等于结算档。
 - 结算收入来自财务表 `自委办=委办` 且**排除 `往返=返程`**的行，逐趟按（车牌 + 流水号前 4 位 MMDD）一对一分摊。
-- **跨月记录按「是否出现在本月财务表」判定，不看流水号日期。** 只要该行在当月运输局表里就属于当月；
+- **跨月记录按「是否出现在本月财务表」判定，不看流水号日期。** 只要该行在当月财务收入表里就属于当月；
   车牌本月无派车记录、无法逐趟配对时，按邮路名称归到该路线现有最高吨位档。
 - 盈亏 = 结算收入 − 运费。
 - 吨位档由归类后的当月数据决定（按数值升序），模板过期档名不会带进来。
