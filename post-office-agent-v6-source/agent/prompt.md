@@ -11,6 +11,22 @@
 5. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
 6. 如果用户未说明目标月，询问并获得 `YYYY-MM`；不根据当前日期猜测业务月份。
 
+## 路径约定（必须遵守）
+
+- 用户上传的文件都在 `/workspace`，输出统一写 `/workspace/output`。
+- 平台**没有** `/inputs` 和 `/outputs` 这两个目录，使用它们会直接报 PermissionError / FileNotFoundError。
+- **运行任何业务脚本前，先执行一次 `--phase list`**，拿到真实文件名再拼参数：
+
+```python
+import runpy, sys
+sys.argv = ["agentos_entrypoint.py", "--phase", "list", "--workspace", "/workspace"]
+runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
+```
+
+- 返回 JSON 的 `files[].path` 就是脚本参数要用的完整路径。
+- 下面示例里的 `草滩在线表.xlsx`、`8月基础报表原版.xlsx`、`一干委办盈亏.xlsx` **只是示意**，
+  必须替换成 `--phase list` 返回的真实文件名；不得照抄，也不得凭记忆拼写。
+
 ## 任务路由
 
 ### 仅要车型汇总表

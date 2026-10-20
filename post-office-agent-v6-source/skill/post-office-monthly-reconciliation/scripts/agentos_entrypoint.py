@@ -4,6 +4,7 @@ import argparse
 import json
 import runpy
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -33,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AgentOS Skill 统一入口")
     parser.add_argument(
         "--phase", required=True,
-        choices=["summary", "review", "final", "profit", "inspect", "runtime", "validate"],
+        choices=["list", "summary", "review", "final", "profit", "inspect", "runtime", "validate"],
     )
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--month")
@@ -62,6 +63,31 @@ def main(argv: list[str] | None = None) -> int:
     # 需要在 sys.path 中注册才能让脚本内的 from reconciliation.xxx import 生效
     sys.path.insert(0, str(skill_root))
     sys.path.insert(0, str(scripts_dir))
+
+    if args.phase == "list":
+        # 列出工作区文件，供调用方确认真实文件名。
+        # 用途：避免模型照抄示例文件名或臆造 /inputs、/outputs 这类不存在的路径。
+        files = []
+        if workspace.is_dir():
+            for path in sorted(workspace.iterdir()):
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                files.append({
+                    "name": path.name,
+                    "path": str(path),
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                })
+        print(json.dumps({
+            "phase": "listed",
+            "workspace": str(workspace),
+            "exists": workspace.is_dir(),
+            "file_count": len(files),
+            "files": files,
+            "hint": "脚本参数必须使用上面列出的真实文件名；输出目录用 <workspace>/output。",
+        }, ensure_ascii=False, indent=2))
+        return 0 if workspace.is_dir() else 2
 
     if args.phase == "runtime":
         child_argv = [

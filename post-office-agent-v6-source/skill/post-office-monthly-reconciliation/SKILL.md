@@ -20,10 +20,26 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 
 1. 使用用户明确给出的 `YYYY-MM` 作为目标月；未给出时先请用户确认。
 2. 将当次动态 Excel 文件全部列入 `code.execute.inputFiles`。
-3. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
-4. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
-5. 如脚本返回 `ok:false`，原样汇报 `errors` 和 `next_action`，不绕过阻断。
-6. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
+3. **运行任何业务脚本前先执行 `--phase list`**，用返回的真实文件名替换示例文件名；
+   不要臆造文件名，也不要使用 `/inputs`、`/outputs`（平台没有这两个目录）。
+4. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
+5. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
+6. 如脚本返回 `ok:false`，原样汇报 `errors` 和 `next_action`，不绕过阻断。
+7. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
+
+## 第 0 步：列目录确认文件名
+
+任何业务脚本之前，先跑一次：
+
+```python
+import runpy, sys
+sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
+sys.argv = ["agentos_entrypoint.py", "--phase", "list", "--workspace", "/workspace"]
+runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
+```
+
+返回 JSON 的 `files[].path` 就是后续参数要用的真实路径。
+下面的示例文件名只是示意，必须替换成这里列出的真实名字。
 
 ## 仅生成车型汇总表
 

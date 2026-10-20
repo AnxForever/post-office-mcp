@@ -315,11 +315,12 @@ python scripts/build_profit_tables.py \
 
 ```
 agentos_entrypoint.py --phase <X>
+   ├─ list      → 列出工作区文件（确认真实文件名，必须在所有业务脚本之前跑）
    ├─ summary   → build_model_summary.py      （只要车型汇总表）
    ├─ review    → run_workflow.py --phase review
    ├─ final     → run_workflow.py --phase final
    ├─ profit    → build_profit_tables.py      （只要盈亏表，两份源文件）
-   ├─ inspect   → inspect_inputs.py           （只预检不生成）
+   ├─ inspect   → inspect_inputs.py           （按结构识别输入角色）
    ├─ runtime   → check_runtime.py            （环境自检）
    └─ validate  → validate_outputs.py         （校验已有输出）
 ```
