@@ -1,0 +1,7 @@
+{
+  "name": "post-office-build-summary",
+  "version": "1.0.0",
+  "type": "dynamic",
+  "description": "合并草滩+港务在线表当月Sheet生成车型汇总表，含跨场地补容间",
+  "scripts": {}
+}

@@ -1,0 +1,69 @@
+# 不确定项标注规则
+
+rules:
+  - id: vol-unmeasured
+    category: 容积
+    color: "#FFA500"
+    color_name: 橙色
+    condition: 在线表当月无任何容积记录
+    action: 标橙，备注"在线表未测量该车，容间缺失，待人工补"
+
+  - id: vol-cross-station
+    category: 容积
+    color: "#BDD7EE"
+    color_name: 蓝色
+    condition: 容积从同车牌跨站点取得
+    action: 标蓝，备注"串行：容积取自同车跨站点/跨日期，请人工核对"
+
+  - id: vol-formula-caotan
+    category: 容积
+    condition: 草滩在线表容积是Excel公式，data_only读不到
+    action: 用长×宽×高硬算
+
+  - id: ton-cross-tier
+    category: 吨位
+    color: "#FFFF00"
+    color_name: 黄色
+    condition: 同车牌不同趟次吨位偏离众数
+    action: 标黄，备注"跨档：本次吨位与车牌众数不一致"
+
+  - id: ton-downgrade
+    category: 吨位
+    color: "#C65911"
+    color_name: 深橙色
+    condition: 结算吨位低于车型吨位（仅车型吨位>=30吨时触发）
+    action: 标深橙，备注注明车型→结算、原运费、差价
+
+  - id: ton-undetermined
+    category: 吨位
+    condition: 容积缺失导致吨位无法判定
+    action: 留空，备注"吨位无法判定：容间缺失，请人工确认"
+
+  - id: price-route-not-found
+    category: 价格
+    color: "#FF6666"
+    color_name: 红色
+    condition: 路线在价格表中完全未找到
+    action: 标红，备注"价格表未覆盖：路线未找到，需人工补"
+
+  - id: price-tier-no-match
+    category: 价格
+    condition: 路线已匹配但吨位无对应价格列
+    action: 备注"吨位无价格：路线已匹配但吨位无对应价格列"
+
+  - id: data-missing
+    category: 数据
+    color: "#FF6666"
+    color_name: 红色
+    condition: 车管记录完全缺失
+    action: 标红，备注"车管数据缺失"
+
+  - id: data-ambiguous-vehicle
+    category: 数据
+    condition: 纯数字车型含义不明确
+    action: 备注"含义不明确，请确认"
+
+  - id: general-leave-empty
+    category: 通用
+    condition: 任何无法确定的字段
+    action: 留空比编造强一百倍。在备注列写明原因，进问题汇总

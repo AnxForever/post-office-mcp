@@ -1,0 +1,7 @@
+{
+  "name": "post-office-build-pnl",
+  "version": "1.0.0",
+  "type": "dynamic",
+  "description": "从核对后初版+财务收入表生成一干/二干盈亏表，含环比区，照搬模板格式。",
+  "scripts": {}
+}

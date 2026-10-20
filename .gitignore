@@ -1,6 +1,17 @@
 __pycache__/
 *.pyc
 *.xlsx
+~$*
 _归档/
 数据/
 4月数据包/
+
+# 打包产物与交付件（由脚本生成，不入库）
+*.zip
+输出/
+post-office-agent-v6-source/agent.zip
+post-office-agent-v6-source/skill.zip
+
+# 本地工具配置
+.aionrs/
+.spec-workflow/

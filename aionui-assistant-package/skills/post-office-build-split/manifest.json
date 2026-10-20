@@ -1,0 +1,7 @@
+{
+  "name": "post-office-build-split",
+  "version": "1.0.0",
+  "type": "dynamic",
+  "description": "从人工核对后的初版按模板生成~100 Sheet拆分版，容间取整，按目的地归类。",
+  "scripts": {}
+}

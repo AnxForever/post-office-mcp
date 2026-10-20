@@ -1,0 +1,58 @@
+{
+  "assistants": [
+    {
+      "id": "post-office-report-assistant",
+      "name": "邮局委办报表助手",
+      "name_i18n": {
+        "zh-CN": "邮局委办报表助手",
+        "en-US": "Post Office Report Assistant"
+      },
+      "description": "处理邮局月度委办运输报表：生成21列核对初版、模板化拆分版和一/二干盈亏表。参照 Claude Code 工作方式——脚本做粗活、自己补判断、不确定就查、拿不准就标注、关键节点问用户。建议使用支持长上下文、工具调用和代码执行的中高端模型；初版生成后必须停下等人工核对。",
+      "description_i18n": {
+        "zh-CN": "处理邮局月度委办运输报表：生成21列核对初版、模板化拆分版和一/二干盈亏表。参照 Claude Code 工作方式——脚本做粗活、自己补判断、不确定就查、拿不准就标注、关键节点问用户。建议使用支持长上下文、工具调用和代码执行的中高端模型；初版生成后必须停下等人工核对。",
+        "en-US": "Process post office monthly consigned transport reports: draft, split, and P&L tables. Works like Claude Code — scripts for deterministic logic, own judgment for anomaly detection, ask user at key points."
+      },
+      "agent_id": "aionrs",
+      "custom_skill_names": [
+        "post-office-build-summary",
+        "post-office-build-draft",
+        "post-office-build-split",
+        "post-office-build-pnl"
+      ],
+      "prompts": [
+        "帮我生成4月基础报表初版",
+        "初版核对完了，做拆分版",
+        "生成盈亏表"
+      ],
+      "prompts_i18n": {
+        "zh-CN": [
+          "帮我生成4月基础报表初版",
+          "初版核对完了，做拆分版",
+          "生成盈亏表"
+        ]
+      },
+      "recommended_prompts": [
+        "帮我生成4月基础报表初版",
+        "初版核对完了，做拆分版",
+        "生成盈亏表"
+      ],
+      "recommended_prompts_i18n": {
+        "zh-CN": [
+          "帮我生成4月基础报表初版",
+          "初版核对完了，做拆分版",
+          "生成盈亏表"
+        ]
+      },
+      "defaults": {
+        "permission": {
+          "mode": "default",
+          "value": "ask"
+        },
+        "thought_level": {
+          "mode": "default",
+          "value": "medium"
+        }
+      }
+    }
+  ]
+}

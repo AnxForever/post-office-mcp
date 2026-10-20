@@ -1,0 +1,7 @@
+{
+  "name": "post-office-build-draft",
+  "version": "1.0.0",
+  "type": "dynamic",
+  "description": "用车管数据为行来源生成21列基础报表初版，含颜色标记和问题汇总。生成后需人工核对。",
+  "scripts": {}
+}
