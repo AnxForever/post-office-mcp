@@ -370,6 +370,40 @@ def check_profit() -> None:
         )
 
 
+def check_pricing() -> None:
+    """价格表单元格已含系数：运价=所在档位单元格，标准价=系数1.0档价格。"""
+    sys.path.insert(0, str(SKILL / "scripts"))
+    try:
+        from reconciliation.excel_io import read_price_catalog
+        from reconciliation.matching import match_price
+    finally:
+        sys.path.pop(0)
+    raw = json.loads((SKILL / "assets" / "route-aliases.json").read_text(encoding="utf-8"))
+    aliases = raw.get("aliases", raw)
+    catalogs = {
+        "first": read_price_catalog(APRIL / "2024年10月新一干价格表(1).xlsx", "first"),
+        "second": read_price_catalog(APRIL / "二干运费价.xlsx", "second"),
+    }
+    cases = [
+        # 路线, 容间, 期望档位, 期望标准价(系数1.0档), 期望运价(=该档位价格表单元格)
+        ("西安-广州(陕1)", 66, "12", 8850, 5575.5),
+        ("西安-汉中港1", 134, "40", 1745, 3001.4),
+        ("西安-银川(陕2)", 136, "30", 4150, 4150),
+    ]
+    for route, volume, tonnage, standard, freight in cases:
+        price = match_price(route, volume, catalogs, aliases)
+        ok = (
+            price.tonnage == tonnage
+            and price.standard_price == standard
+            and price.freight == freight
+        )
+        record(
+            f"pricing: {route} {tonnage}吨 运价不重复乘系数",
+            ok,
+            f"ton={price.tonnage} std={price.standard_price} freight={price.freight}",
+        )
+
+
 def check_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp) / "workspace"
@@ -499,6 +533,7 @@ def main() -> int:
     check_list()
     check_inspect()
     check_profit()
+    check_pricing()
     check_publish()
     check_package()
     if not args.fast:

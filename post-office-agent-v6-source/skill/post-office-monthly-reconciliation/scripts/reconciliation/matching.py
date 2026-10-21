@@ -136,6 +136,31 @@ def _alias_price_source(route: str, aliases: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _baseline_price(
+    route_info: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    fallback: Any,
+) -> Any:
+    """Return the contract base price (the tier whose coefficient is 1.0).
+
+    Price-table columns already carry the coefficient: e.g. "系数0.63 /
+    12吨" holds 30吨价×0.63. The official report therefore prints that base
+    price in 标准价 and the selected tier's cell value in 运价.
+    """
+    prices = route_info.get("prices", {})
+    for tier in catalog.get("tiers", []):
+        try:
+            if Decimal(str(tier.get("coefficient"))) != Decimal(1):
+                continue
+        except Exception:
+            continue
+        value = prices.get(tonnage_key(tier.get("key")))
+        if value not in (None, ""):
+            return value
+        return fallback
+    return fallback
+
+
 def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[str, Any] | None:
     eligible: list[tuple[Decimal, Mapping[str, Any]]] = []
     for tier in catalog.get("tiers", []):
@@ -227,8 +252,8 @@ def match_price(
             coefficient=coefficient,
             issues=[Issue("price_route_uncovered", "red", "路线未被对应干线价格表覆盖", "维护路线别名或价格资产")],
         )
-    standard = route_info.get("prices", {}).get(key)
-    if standard in (None, ""):
+    tier_price = route_info.get("prices", {}).get(key)
+    if tier_price in (None, ""):
         return PriceMatch(
             kind=resolved_kind,
             catalog_kind=catalog_kind,
@@ -239,7 +264,10 @@ def match_price(
             coefficient=coefficient,
             issues=[Issue("price_missing", "red", "路线已匹配但吨位价格为空", "维护价格资产或人工补充")],
         )
-    freight = Decimal(str(coefficient)) * Decimal(str(standard))
+    # 价格表单元格已经是"标准价×系数"，直接作为运价；再乘一次系数会把
+    # 12吨一干价压低 37%、40吨二干价抬高 72%。
+    standard = _baseline_price(route_info, catalog, tier_price)
+    freight = float(tier_price)
     return PriceMatch(
         kind=resolved_kind,
         catalog_kind=catalog_kind,
@@ -249,7 +277,7 @@ def match_price(
         distance=route_info.get("distance"),
         coefficient=coefficient,
         standard_price=standard,
-        freight=float(freight) if freight % 1 else int(freight),
+        freight=freight if freight % 1 else int(freight),
     )
 
 
@@ -320,13 +348,17 @@ def apply_settlement_tonnage(
     settlement_key = tonnage_key(settlement_tier.get("key"))
     coefficient = settlement_tier.get("coefficient")
     route_info = catalog.get("routes", {}).get(price.route or "")
-    standard_price = route_info.get("prices", {}).get(settlement_key) if route_info else None
+    # 价格表单元格就是该档位的最终运价；标准价保持合同基准档（系数1.0）价格。
+    tier_price = route_info.get("prices", {}).get(settlement_key) if route_info else None
+    standard_price = price.standard_price
+    if standard_price in (None, "") and route_info:
+        standard_price = _baseline_price(route_info, catalog, tier_price)
     freight = original_freight = difference = None
-    if standard_price not in (None, "") and coefficient not in (None, ""):
-        freight_value = Decimal(str(coefficient)) * Decimal(str(standard_price))
+    if tier_price not in (None, ""):
+        freight_value = Decimal(str(tier_price))
         freight = float(freight_value) if freight_value % 1 else int(freight_value)
-        if price.coefficient not in (None, ""):
-            original_value = Decimal(str(price.coefficient)) * Decimal(str(standard_price))
+        if price.freight not in (None, ""):
+            original_value = Decimal(str(price.freight))
             original_freight = float(original_value) if original_value % 1 else int(original_value)
             difference_value = freight_value - original_value
             difference = float(difference_value) if difference_value % 1 else int(difference_value)
@@ -341,7 +373,7 @@ def apply_settlement_tonnage(
         "核对车管结算吨位与降档价格",
     )
     issues = [issue for issue in price.issues if issue.code != "price_missing"]
-    if standard_price in (None, ""):
+    if tier_price in (None, ""):
         issues.append(Issue("price_missing", "red", "降吨位后对应吨位价格为空", "维护价格表或人工补充"))
     issues.append(issue)
     return replace(

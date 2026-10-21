@@ -14,7 +14,13 @@ from openpyxl import load_workbook
 from reconciliation.calculations import aggregate_profit, apply_cross_tonnage_flags
 from reconciliation.excel_io import file_sha256, read_finance_rows, read_price_catalog
 from reconciliation.integrity import REQUIRED_ASSETS, validate_authoritative_rows, validate_authoritative_state, verify_state_files
-from reconciliation.matching import _tonnage_number, apply_settlement_tonnage, match_price
+from reconciliation.matching import (
+    _alias_kind,
+    _alias_route,
+    _tonnage_number,
+    apply_settlement_tonnage,
+    match_price,
+)
 from reconciliation.normalize import normalize_plate, normalize_text, route_candidates, tonnage_key
 from reconciliation.template_discovery import discover_profit_template, discover_split_template
 from reconciliation.templates import REVIEW_HEADERS, write_profit_workbook, write_split_workbook
@@ -214,6 +220,11 @@ def _split_record_count(path: Path) -> int:
 def _classify_finance_route(route: Any, catalogs: dict[str, Any], aliases: dict[str, Any]) -> tuple[str | None, str | None]:
     matches: list[tuple[str, str]] = []
     for candidate in route_candidates(route, aliases):
+        # 与 match_price 一致：别名可以声明干线类型（如固原/平凉/天水/庆阳
+        # 属于二干，但价格取自一干价格表），不能只看价格表里有没有这条路线。
+        preferred = _alias_kind(candidate, aliases)
+        if preferred in catalogs:
+            return preferred, _alias_route(candidate, aliases) or candidate
         for kind, catalog in catalogs.items():
             if candidate in catalog.get("routes", {}):
                 matches.append((kind, candidate))
@@ -384,6 +395,7 @@ def build_final_reports(
     if sum(expected_split_counts.values()) != len(rows):
         split_path.unlink(missing_ok=True)
         raise ValueError("拆分版记录数与修订初版不守恒")
+    unmatched_split = expected_split_counts.get("※未匹配目的地", 0)
     # These tabs are generated from explicit business classifications. The
     # two-trip tab remains manual-pending when the corrected workbook contains
     # no explicit merge instruction; it must never be inferred from a plate or
@@ -537,6 +549,11 @@ def build_final_reports(
         warnings.append(
             "官方特殊Sheet未自动填充，需人工补齐后才能作为完整官方交付件: "
             + "、".join(pending_special)
+        )
+    if unmatched_split:
+        warnings.append(
+            f"拆分版有{unmatched_split}条记录无法按路线名匹配官方线路Sheet，"
+            "已放入「※未匹配目的地」，需人工指定归属后交付"
         )
     previous_profit_files = {
         kind: item["path"]
