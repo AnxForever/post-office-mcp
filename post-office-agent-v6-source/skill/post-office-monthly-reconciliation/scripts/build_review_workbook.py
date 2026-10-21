@@ -147,8 +147,13 @@ def _format_review_remark(
     model_problem: Any,
     model_remark: Any,
     issues: list[Issue],
+    *,
+    round_trip: bool = False,
 ) -> str | None:
-    """备注列留空，问题全部进问题汇总Sheet."""
+    """备注列只写业务标记（往返邮路），问题全部进问题汇总Sheet."""
+    if round_trip:
+        # 第二阶段只拿到修订初版，无法回读车管；用备注把往返标记带过去。
+        return "往返邮路"
     return None
     original = normalize_text(model_problem)  # unreachable, kept for reference
     if original and re.fullmatch(r"\d+(?:\.0+)?", original):
@@ -266,6 +271,12 @@ def build_review_workbook(
                 matched_model_keys.add((measurement_date, plate))
         issues = _model_issues(model) if model is not None else [_unmatched_issue(vehicle)]
         volume = model.get("measured_volume") if model is not None else None
+        # 车管「往返属性=往返、邮路往返属性=去程」的行按往返价结算，
+        # 同单号的返程行不单独计价。
+        round_trip = (
+            normalize_text(vehicle.get("round_trip_attribute")) == "往返"
+            and normalize_text(vehicle.get("route_direction")) != "返程"
+        )
         # Even when the vehicle has no model-summary match, resolve the route
         # with a zero volume. This preserves the official price-table distance
         # and route type in the issue row while leaving tonnage/freight blank.
@@ -274,6 +285,7 @@ def build_review_workbook(
             volume if model is not None else 0,
             catalogs,
             aliases,
+            round_trip=round_trip,
         )
         issues.extend(price.issues)
         source_id = _vehicle_source_id(vehicle, source_hashes)
@@ -310,6 +322,7 @@ def build_review_workbook(
                 model.get("model_problem") if model is not None else None,
                 model.get("remark") if model is not None else None,
                 issues,
+                round_trip=round_trip,
             ),
             "vehicle_missing": "是" if model is None else "否",
             "data_missing": "否" if model is None else _data_missing_flag(vehicle, price),

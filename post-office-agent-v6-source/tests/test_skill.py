@@ -403,6 +403,27 @@ def check_pricing() -> None:
             f"ton={price.tonnage} std={price.standard_price} freight={price.freight}",
         )
 
+    round_trip_cases = [
+        # 路线, 容间, 期望档位, 期望标准价, 期望运价
+        # 一干：往返 Sheet 写全档位，直接取 30 吨单元格。
+        ("西安-银川(陕2)", 139, "30", 7000, 7000),
+        # 二干：往返列只写 12 吨价，30 吨由系数折算。
+        ("西安-汉中提速1", 62, "12", 2570, 2570),
+        ("西安-宝鸡港1", 165, "40", 1698.3, 2921.08),
+    ]
+    for route, volume, tonnage, standard, freight in round_trip_cases:
+        price = match_price(route, volume, catalogs, aliases, round_trip=True)
+        ok = (
+            price.tonnage == tonnage
+            and price.standard_price == standard
+            and float(price.freight) == freight
+        )
+        record(
+            f"pricing: {route} {tonnage}吨 往返价",
+            ok,
+            f"ton={price.tonnage} std={price.standard_price} freight={price.freight}",
+        )
+
 
 def check_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -483,7 +504,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.2.0", manifest.get("version") == "6.2.0", manifest.get("version", ""))
+    record("package: 版本 6.2.1", manifest.get("version") == "6.2.1", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))

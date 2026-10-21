@@ -44,7 +44,7 @@ REQUIRED_ROLES = {
     "first_profit_template": 1,
     "second_profit_template": 1,
 }
-PACKAGE_VERSION = "6.2.0"
+PACKAGE_VERSION = "6.2.1"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:

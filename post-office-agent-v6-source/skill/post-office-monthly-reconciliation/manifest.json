@@ -1,6 +1,6 @@
 {
   "name": "post-office-monthly-reconciliation",
-  "version": "6.2.0",
+  "version": "6.2.1",
   "type": "bound",
   "description": "邮局月度委办运输报表预检、人工核对与最终交付",
   "scripts": {

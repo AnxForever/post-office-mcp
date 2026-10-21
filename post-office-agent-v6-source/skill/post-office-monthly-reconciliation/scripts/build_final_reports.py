@@ -250,7 +250,9 @@ def _recalculate_derived_fields(
         volume = row.get("volume")
         if volume is None or volume == "":
             volume = 0
-        price = match_price(row.get("route"), volume, catalogs, aliases)
+        # 第一阶段把车管的往返属性写到备注；第二阶段据此改用往返价。
+        round_trip = "往返邮路" in normalize_text(row.get("remark"))
+        price = match_price(row.get("route"), volume, catalogs, aliases, round_trip=round_trip)
         row["price_kind"] = price.kind
         row["standard_route"] = price.route
         row["model_tonnage"] = price.model_tonnage

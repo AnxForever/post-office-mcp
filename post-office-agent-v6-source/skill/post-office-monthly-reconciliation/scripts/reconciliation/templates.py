@@ -304,6 +304,16 @@ def _route_sheet(route: Any, split_layout: dict[str, Any]) -> str | None:
     return None
 
 
+def _round_trip_sheet(route: Any, split_layout: dict[str, Any]) -> str | None:
+    """往返行优先落到「<目的地>往返」页签（如 银川往返）。"""
+    writable = set(split_layout.get("writable_sheets", ()))
+    for candidate in route_candidates(route):
+        target = f"{destination_name(candidate)}往返"
+        if target in writable:
+            return target
+    return None
+
+
 def _split_row_values(row: dict[str, Any], index: int, headers: list[Any]) -> list[Any]:
     direct = [
         index, row.get("company"), row.get("dispatch_no"), row.get("route"), None, row.get("seal_time"), None,
@@ -526,14 +536,20 @@ def write_split_workbook(
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        sheet = next(
-            (
-                target
-                for route in (row.get("standard_route"), row.get("route"))
-                if route and (target := _route_sheet(route, split_layout))
-            ),
-            "※未匹配目的地",
-        )
+        sheet = None
+        if "往返邮路" in str(row.get("remark") or ""):
+            for route in (row.get("standard_route"), row.get("route")):
+                if route and (sheet := _round_trip_sheet(route, split_layout)):
+                    break
+        if not sheet:
+            sheet = next(
+                (
+                    target
+                    for route in (row.get("standard_route"), row.get("route"))
+                    if route and (target := _route_sheet(route, split_layout))
+                ),
+                "※未匹配目的地",
+            )
         grouped.setdefault(sheet, []).append(row)
     if not grouped:
         wb.close()

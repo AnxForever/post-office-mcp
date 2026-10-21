@@ -47,6 +47,10 @@ VEHICLE_FIELDS = {
     "trailer": ["车厢码", "挂车号"],
     "transport_volume": ["邮运量"],
     "settlement_tonnage": ["结算吨位"],
+    # 往返属性=往返、邮路往返属性=去程 的行，按价格表「往返」价结算；
+    # 同一派车单号的返程行不单独计价。
+    "round_trip": ["往返属性"],
+    "route_direction": ["邮路往返属性"],
 }
 
 FINANCE_FIELDS = {
@@ -506,6 +510,8 @@ def read_vehicle_rows(
                         "trailer_key": trailer,
                         "transport_volume": _to_number(_value(row, field_map, "transport_volume")),
                         "settlement_tonnage": _to_number(_value(row, field_map, "settlement_tonnage")),
+                        "round_trip_attribute": normalize_text(_value(row, field_map, "round_trip")),
+                        "route_direction": normalize_text(_value(row, field_map, "route_direction")),
                     })
         finally:
             wb.close()
@@ -628,6 +634,33 @@ def _price_tier_header(
     return None
 
 
+def _special_price_columns(ws, header_row: int, distance_column: int) -> dict[int, tuple[str, str]]:
+    """Find 返程 / 往返 price columns that sit outside the normal tier grid.
+
+    二干价目表把返程、往返各放一列（都只写 12 吨价），列头上方标着
+    「返程」「往返」，和常规的「12吨/20吨…」档位列不在一起。
+    返回 {列号: (标签, 吨位键)}。
+    """
+    result: dict[int, tuple[str, str]] = {}
+    for column in range(distance_column + 1, ws.max_column + 1):
+        label = None
+        for row in range(max(1, header_row - 2), header_row + 1):
+            text = normalize_text(ws.cell(row, column).value)
+            if text in {"往返", "返程"}:
+                label = text
+                break
+        if not label:
+            continue
+        key = None
+        for row in range(header_row, min(ws.max_row, header_row + 2) + 1):
+            if "吨" in normalize_text(ws.cell(row, column).value):
+                key = tonnage_key(ws.cell(row, column).value)
+                break
+        if key:
+            result[column] = (label, key)
+    return result
+
+
 def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
     wb = load_workbook(path, read_only=False, data_only=False, keep_links=False)
     catalog: dict[str, Any] = {"kind": kind, "tiers": [], "routes": {}, "sheets": []}
@@ -642,6 +675,10 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
             header_row = route_header["row"]
             route_column = route_header["column"]
             distance_column = distance_header["column"]
+            # 「往返」是独立 Sheet（一干价目表）：整页价格都是往返价，
+            # 不能覆盖同路线在「单程」页的价格。
+            sheet_round_trip = "往返" in normalize_text(ws.title)
+            special_columns = _special_price_columns(ws, header_row, distance_column)
             numeric_coefficient_rows = {
                 row
                 for row in range(1, min(ws.max_row, 30) + 1)
@@ -674,6 +711,7 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
             ) + 1
             catalog["sheets"].append({
                 "sheet": ws.title,
+                "round_trip": sheet_round_trip,
                 "route_header": route_header,
                 "distance_header": distance_header,
                 "tier_headers": [
@@ -700,14 +738,43 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
                     for item in tier_headers
                 }
                 prices = {key: value for key, value in prices.items() if value is not None}
-                if not prices:
+                round_trip_prices: dict[str, Any] = {}
+                return_prices: dict[str, Any] = {}
+                for column, (label, special_key) in special_columns.items():
+                    value = _number_from_cell(ws, row, column)
+                    if value is None:
+                        continue
+                    if label == "往返":
+                        round_trip_prices[special_key] = value
+                    else:
+                        return_prices[special_key] = value
+                if not prices and not round_trip_prices:
                     continue
-                catalog["routes"].setdefault(route, {
-                    "distance": distance,
-                    "prices": prices,
-                    "sheet": ws.title,
-                    "kind": kind,
-                })
+                if sheet_round_trip:
+                    entry = catalog["routes"].get(route)
+                    if entry is None:
+                        entry = catalog["routes"][route] = {
+                            "distance": distance,
+                            "prices": {},
+                            "sheet": ws.title,
+                            "kind": kind,
+                        }
+                    entry.setdefault("round_trip_prices", {}).update(prices)
+                    continue
+                entry = catalog["routes"].get(route)
+                if entry is None:
+                    entry = catalog["routes"][route] = {
+                        "distance": distance,
+                        "prices": prices,
+                        "sheet": ws.title,
+                        "kind": kind,
+                    }
+                elif not entry.get("prices"):
+                    entry["prices"] = prices
+                if round_trip_prices:
+                    entry.setdefault("round_trip_prices", {}).update(round_trip_prices)
+                if return_prices:
+                    entry.setdefault("return_prices", {}).update(return_prices)
     finally:
         wb.close()
     catalog["tiers"] = sorted(tier_definitions.values(), key=lambda item: (item["min_volume"], item["key"]))

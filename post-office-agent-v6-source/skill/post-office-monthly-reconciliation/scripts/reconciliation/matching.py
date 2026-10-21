@@ -161,6 +161,63 @@ def _baseline_price(
     return fallback
 
 
+def _round_trip_price(
+    prices: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    key: str,
+    coefficient: Any,
+) -> tuple[Any, Decimal] | None:
+    """Return (标准价, 运价) from a 往返 price column.
+
+    一干价目表的「往返」Sheet 写全了各档位，直接取所在档位单元格。
+    二干价目表只写 12 吨往返价，其余档位按「12 吨价 × 系数 / 12 吨系数」
+    折算，标准价仍是 12 吨往返价（与官方表一致）。
+    """
+    base_key: str | None = None
+    base_coefficient = Decimal("1")
+    for tier in catalog.get("tiers", []):
+        try:
+            if Decimal(str(tier.get("coefficient"))) != Decimal(1):
+                continue
+        except Exception:
+            continue
+        base_key = tonnage_key(tier.get("key"))
+        break
+    base_value = prices.get(base_key) if base_key else None
+    if base_value in (None, ""):
+        for candidate_key, candidate_value in prices.items():
+            if candidate_value not in (None, ""):
+                base_key, base_value = candidate_key, candidate_value
+                base_coefficient = _tier_coefficient(catalog, base_key)
+                break
+    if base_value in (None, ""):
+        return None
+    try:
+        base_decimal = Decimal(str(base_value))
+    except Exception:
+        return None
+    direct = prices.get(key)
+    if direct not in (None, ""):
+        freight = Decimal(str(direct))
+    else:
+        try:
+            # 二干只给 12 吨往返价，其余档位由系数折算；官方保留两位小数。
+            freight = (base_decimal * Decimal(str(coefficient)) / base_coefficient).quantize(Decimal("0.01"))
+        except Exception:
+            return None
+    return base_value, freight
+
+
+def _tier_coefficient(catalog: Mapping[str, Any], key: str) -> Decimal:
+    for tier in catalog.get("tiers", []):
+        if tonnage_key(tier.get("key")) == key:
+            try:
+                return Decimal(str(tier.get("coefficient")))
+            except Exception:
+                break
+    return Decimal("1")
+
+
 def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[str, Any] | None:
     eligible: list[tuple[Decimal, Mapping[str, Any]]] = []
     for tier in catalog.get("tiers", []):
@@ -178,6 +235,8 @@ def match_price(
     volume: Any,
     catalogs: Mapping[str, Mapping[str, Any]],
     aliases: Mapping[str, Any],
+    *,
+    round_trip: bool = False,
 ) -> PriceMatch:
     try:
         volume_number = Decimal(str(volume))
@@ -251,6 +310,32 @@ def match_price(
             model_tonnage=key,
             coefficient=coefficient,
             issues=[Issue("price_route_uncovered", "red", "路线未被对应干线价格表覆盖", "维护路线别名或价格资产")],
+        )
+    round_trip_prices = route_info.get("round_trip_prices") or {}
+    if round_trip and round_trip_prices:
+        priced = _round_trip_price(round_trip_prices, catalog, key, coefficient)
+        if priced is None:
+            return PriceMatch(
+                kind=resolved_kind,
+                catalog_kind=catalog_kind,
+                route=resolved_route,
+                tonnage=key,
+                model_tonnage=key,
+                distance=route_info.get("distance"),
+                coefficient=coefficient,
+                issues=[Issue("price_missing", "red", "往返价目缺失", "维护价格表往返价或人工补充")],
+            )
+        standard, freight = priced
+        return PriceMatch(
+            kind=resolved_kind,
+            catalog_kind=catalog_kind,
+            route=resolved_route,
+            tonnage=key,
+            model_tonnage=key,
+            distance=route_info.get("distance"),
+            coefficient=coefficient,
+            standard_price=standard,
+            freight=float(freight) if freight % 1 else int(freight),
         )
     tier_price = route_info.get("prices", {}).get(key)
     if tier_price in (None, ""):
