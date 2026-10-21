@@ -1,5 +1,6 @@
 from __future__ import annotations
 from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
+from reconciliation.paths import SKIP_DIRS, resolve_input_dir
 
 import argparse
 import json
@@ -30,6 +31,55 @@ def _resolve_skill_root(explicit: Path | str | None) -> Path:
     raise FileNotFoundError(
         "无法定位 skill 包根目录。请通过 --bundle-root 显式指定。"
     )
+
+
+def _scan_input_roots(workspace: Path, skill_root: Path) -> dict:
+    """诊断上传文件的实际落盘位置。
+
+    不同版本的平台把附件放在不同目录，只认 `/workspace` 会在部署变更后
+    误报「缺少全部输入」。这里列出几个候选根目录下的 Excel 文件，供排查。
+    """
+    candidates = [
+        workspace,
+        Path("/workspace"),
+        Path("/workspace/uploads"),
+        Path("/mnt/data"),
+        Path("/tmp"),
+        Path("/mnt"),
+        Path("/home"),
+        Path("/root"),
+        Path("/data"),
+        Path.cwd(),
+        skill_root.parent,
+        Path("/"),
+    ]
+    seen: set[str] = set()
+    roots = []
+    for root in candidates:
+        try:
+            key = str(root.resolve())
+        except OSError:
+            continue
+        if key in seen or not root.is_dir():
+            continue
+        seen.add(key)
+        matches: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = len(Path(dirpath).relative_to(root).parts)
+            max_depth = 2 if root == Path("/") else 3
+            if depth >= max_depth:
+                dirnames[:] = []
+            dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS and not name.startswith(".")]
+            for name in sorted(filenames):
+                if name.startswith("~$") or not name.lower().endswith((".xlsx", ".xls")):
+                    continue
+                matches.append(str(Path(dirpath) / name))
+                if len(matches) >= 50:
+                    break
+            if len(matches) >= 50:
+                break
+        roots.append({"root": str(root), "excel_count": len(matches), "samples": matches[:10]})
+    return {"cwd": os.getcwd(), "roots": roots}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     skill_root = _resolve_skill_root(args.bundle_root)
     scripts_dir = skill_root / "scripts"
     workspace = Path(args.workspace).resolve()
+    # 旧版平台把附件挂在 /workspace，新版挂在 /inputs。两者都接受。
+    input_dir = resolve_input_dir(workspace)
 
     # AgentOS 沙箱中 skill 包放在 /workspace/skills/<name>/，
     # 需要在 sys.path 中注册才能让脚本内的 from reconciliation.xxx import 生效
@@ -78,9 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         # 列出工作区文件，供调用方确认真实文件名。
         # 用途：避免模型照抄示例文件名或臆造 /inputs、/outputs 这类不存在的路径。
         files = []
-        if workspace.is_dir():
-            for path in sorted(workspace.iterdir()):
-                if not path.is_file():
+        if input_dir.is_dir():
+            for path in sorted(input_dir.rglob("*")):
+                if not path.is_file() or path.name.startswith("~$"):
                     continue
                 stat = path.stat()
                 files.append({
@@ -92,9 +144,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "phase": "listed",
             "workspace": str(workspace),
+            "input_dir": str(input_dir),
             "exists": workspace.is_dir(),
             "file_count": len(files),
             "files": files,
+            "diagnostics": _scan_input_roots(workspace, skill_root),
             "hint": "下一步执行 --phase detect 按表结构识别文件角色；脚本参数只使用 resolved 中的真实路径。",
         }, ensure_ascii=False, indent=2))
         return 0 if workspace.is_dir() else 2
@@ -110,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                 "errors": ["detect 阶段需要 --month YYYY-MM"],
             }, ensure_ascii=False))
             return 2
-        result = detect_for_phase(workspace, args.month, args.task)
+        result = detect_for_phase(input_dir, args.month, args.task)
         ok = not result["missing"] and not result["ambiguous"]
         payload = {"ok": ok, **result}
         if result["ambiguous"]:
@@ -132,12 +186,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.phase == "inspect":
-        # 只做输入预检，不生成报表。workspace 既是输入目录，也是 run-state 的落盘位置。
+        # 只做输入预检，不生成报表。上传目录可能不是 workspace（新版在 /inputs），
+        # run-state 始终落在 workspace/output。
         output_dir = args.output_dir or (workspace / "output")
         output_dir.mkdir(parents=True, exist_ok=True)
         child_argv = [
             "inspect_inputs.py",
-            "--input-dir", str(workspace),
+            "--input-dir", str(input_dir),
             "--workspace-dir", str(output_dir),
         ]
         if args.month:
@@ -171,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             # 未指定文件时，按表结构自动识别草滩/港务在线表
             from reconciliation.detect import detect_for_phase
 
-            result = detect_for_phase(workspace, args.month, "summary")
+            result = detect_for_phase(input_dir, args.month, "summary")
             resolved = result["resolved"]
             if not caotan and len(resolved.get("online_caotan", [])) == 1:
                 caotan = Path(resolved["online_caotan"][0])
@@ -205,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             "run_workflow.py",
             "--phase", "review",
             "--workspace", str(workspace),
+            "--input-dir", str(input_dir),
             "--bundle-root", str(skill_root),
         ]
         if args.month:
@@ -226,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             "run_workflow.py",
             "--phase", "final",
             "--workspace", str(workspace),
+            "--input-dir", str(input_dir),
             "--review-file", str(args.review_file),
             "--bundle-root", str(skill_root),
         ]
@@ -252,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             # 表头含 结算收入 + 普服收入 的是财务收入表（客户可能叫「运输局」）。
             from reconciliation.detect import detect_for_phase
 
-            result = detect_for_phase(workspace, args.month, "profit")
+            result = detect_for_phase(input_dir, args.month, "profit")
             resolved = result["resolved"]
             if not base_file and len(resolved.get("base_report", [])) == 1:
                 base_file = Path(resolved["base_report"][0])

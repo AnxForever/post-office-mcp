@@ -13,6 +13,7 @@ from check_runtime import REQUIRED_REFERENCES, run_checks
 from inspect_inputs import inspect_inputs
 from validate_outputs import validate_outputs
 from reconciliation.integrity import file_sha256
+from reconciliation.paths import resolve_input_dir
 
 
 class _TerminalArgumentParser(argparse.ArgumentParser):
@@ -78,6 +79,7 @@ def _run_workflow(
     bundle_root: Path | str | None = None,
     previous_first_profit: Path | str | None = None,
     previous_second_profit: Path | str | None = None,
+    input_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     if phase not in {"review", "final"}:
         return _terminal(
@@ -96,6 +98,8 @@ def _run_workflow(
         )
 
     workspace = Path(workspace).resolve()
+    # 上传附件可能挂载在 /inputs（新版平台）而不是 workspace；输出始终写 workspace/output。
+    input_dir = Path(input_dir).resolve() if input_dir is not None else resolve_input_dir(workspace)
     bundle_root = Path(bundle_root).resolve() if bundle_root is not None else Path(__file__).resolve().parents[1]
     output_dir = workspace / "output"
     assets = bundle_root / "assets"
@@ -123,7 +127,7 @@ def _run_workflow(
             )
 
     if phase == "review":
-        inspection = inspect_inputs(workspace, output_dir, month, assets_dir=assets)
+        inspection = inspect_inputs(input_dir, output_dir, month, assets_dir=assets)
         if not inspection["ok"]:
             return _terminal(
                 False,
@@ -133,7 +137,7 @@ def _run_workflow(
                 errors=inspection["fatal_errors"],
                 next_action="请按阻断原因补充或修正当月文件",
             )
-        model_summary, review = build_review_workbook(workspace, output_dir, month, assets_dir=assets)
+        model_summary, review = build_review_workbook(input_dir, output_dir, month, assets_dir=assets)
         validation = validate_outputs(output_dir, "review")
         state = json.loads((output_dir / "run-state.json").read_text(encoding="utf-8"))
         if not validation["ok"]:
@@ -165,16 +169,23 @@ def _run_workflow(
         )
     review_path = Path(review_file)
     if not review_path.is_absolute():
-        review_path = workspace / review_path
+        review_path = input_dir / review_path
     review_path = review_path.resolve()
-    try:
-        review_path.relative_to(workspace)
-    except ValueError:
+    # 上传目录可能是 /inputs，也可能是 workspace；两者都允许。
+    allowed = False
+    for root in (input_dir, workspace):
+        try:
+            review_path.relative_to(root)
+            allowed = True
+            break
+        except ValueError:
+            continue
+    if not allowed:
         return _terminal(
             False,
             "failed",
-            errors=["review_file 必须位于当前 workspace 内"],
-            next_action="请上传当前任务 workspace 内的人工修订初版",
+            errors=["review_file 必须位于当前任务的上传目录或 workspace 内"],
+            next_action="请上传当前任务可见的人工修订初版",
         )
     outputs = build_final_reports(review_path, output_dir, assets_dir=assets, previous_first_profit=previous_first_profit, previous_second_profit=previous_second_profit)
     validation = validate_outputs(output_dir, "final")
@@ -211,6 +222,7 @@ def run_workflow(
     bundle_root: Path | str | None = None,
     previous_first_profit: Path | str | None = None,
     previous_second_profit: Path | str | None = None,
+    input_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     try:
         return _run_workflow(
@@ -221,6 +233,7 @@ def run_workflow(
             bundle_root,
             previous_first_profit,
             previous_second_profit,
+            input_dir,
         )
     except Exception as exc:
         return _terminal(
@@ -235,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _TerminalArgumentParser(description="执行月度委办运输报表单次工作流")
     parser.add_argument("--phase", required=True)
     parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--input-dir", type=Path, help="上传目录（默认与 workspace 相同）")
     parser.add_argument("--month")
     parser.add_argument("--review-file", type=Path)
     parser.add_argument("--bundle-root", type=Path)
@@ -250,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             bundle_root=args.bundle_root,
             previous_first_profit=args.previous_first_profit,
             previous_second_profit=args.previous_second_profit,
+            input_dir=args.input_dir,
         )
     except Exception as exc:
         result = _terminal(

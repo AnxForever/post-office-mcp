@@ -424,6 +424,21 @@ def check_package() -> None:
     names = zipfile.ZipFile(zips[0]).namelist()
     record("package: 包含 detect.py", "scripts/reconciliation/detect.py" in names)
     record("package: 包含 detect 入口", "scripts/agentos_entrypoint.py" in names)
+    record("package: 包含输入目录解析", "scripts/reconciliation/paths.py" in names)
+
+    # 平台「导入专家」只接受 agent/agent.yaml 结构，且技能必须随包放在
+    # agent/skills/<name>/ 下，否则导入后任务会报「绑定技能未安装」。
+    agentos = sorted(ROOT.glob("*.agentos.zip"))
+    if not agentos:
+        record("package: agentos 导入包存在", False)
+        return
+    agent_names = set(zipfile.ZipFile(agentos[0]).namelist())
+    record("package: agentos 含 agent.yaml", "agent/agent.yaml" in agent_names)
+    record("package: agentos 含 prompt.md", "agent/prompt.md" in agent_names)
+    record(
+        "package: agentos 随包携带技能",
+        "agent/skills/post-office-monthly-reconciliation/manifest.json" in agent_names,
+    )
 
 
 def main() -> int:

@@ -456,9 +456,26 @@ python post-office-agent-v6-source/tests/test_skill.py --fast   # 跳过完整 r
 | inspect / runtime | 参数转发正确，环境自检通过 |
 | profit | 产出两张盈亏表，未匹配趟次 ≤ 100 |
 | review / final | 指标等于基线，产出拆分版 + 两张盈亏表 |
-| package | zip 含 `detect.py`，版本与 manifest 一致 |
+| package | zip 含 `detect.py`、`reconciliation/paths.py`，版本与 manifest 一致 |
+| package | `.agentos.zip` 含 `agent/agent.yaml`、`agent/prompt.md`、随包技能 |
 
 依赖本地数据目录 `4月数据包/`、`数据/委办报表开发/3月/`、`数据/`（均不入库）。
+
+### AgentOS 线上回归（2026-10-21）
+
+在 `82.156.101.236:8090` 上用 4 月数据包实跑了完整链路：
+
+| 阶段 | 结果 |
+|---|---|
+| 导入专家 V6.2 | 导入成功，技能 `post-office-monthly-reconciliation` 绑定成功 |
+| `--phase detect` | 16 个文件全部识别，8 类必需角色唯一命中，`missing`/`ambiguous` 为空 |
+| `--phase review` | 初版 1284 行，问题 23 条（缺容间 8 / 缺吨位 5 / 缺价格 4 / 缺路线 3 / 趟次未匹配 3） |
+| `--phase final` | 拆分版 1284 行；一干 18 路线 412 趟；二干 27 路线 651 趟；行数守恒全部通过 |
+| `--phase validate --stage final` | 12 项通过 11 项；唯一失败是「两趟合一趟」未生成（初版没有合并指令，属预期） |
+
+这次线上跑暴露了一个平台差异：新版本把上传附件挂在只读的 `/inputs`，
+不再放 `/workspace`。技能已改为自动解析（`reconciliation/paths.py`），
+`--phase list` 的 `input_dir` 会返回真实位置。
 Windows 上偶发原生崩溃（0xC0000005）时脚本会自动重跑一次并打印 `[WARN]`；
 该问题的现状和已知边界见第九节。
 
@@ -470,10 +487,24 @@ Windows 上偶发原生崩溃（0xC0000005）时脚本会自动重跑一次并�
 python post-office-agent-v6-source/build_packages.py
 ```
 
-产出两个包到仓库根目录：
+产出三个包到仓库根目录：
 
-- `post-office-monthly-reconciliation-skill.zip`（后台 skill 包）
-- `邮局委办运输报表核对V6.2-agent.zip`（AgentOS 导入包，内嵌全部 skill 文件）
+- `post-office-monthly-reconciliation-skill.zip`（后台 skill 包，对应 `POST /api/skills/upload`）
+- `邮局委办运输报表核对V6.2.agentos.zip`（**AgentOS「导入专家」用这个**）
+- `邮局委办运输报表核对V6.2-agent.zip`（`agentos-v1` 导出格式，仅供导出/备份，导入对话框不接受）
+
+`.agentos.zip` 的结构必须是：
+
+```
+agent/agent.yaml
+agent/prompt.md
+agent/skills/post-office-monthly-reconciliation/...
+```
+
+只放 `agent.json` 会在导入时报「缺少 agent.yaml」；技能不放在
+`agent/skills/<name>/` 下，导入后启动任务会报「绑定技能未安装」。
+另外，即使包内带了技能，平台当前版本也不会自动注册到技能列表，
+仍需通过 `POST /api/skills/upload` 单独安装一次。
 
 包名与 `manifest.json` 的 `version` 同步，版本号变了包名自动跟着变，不要手改文件名。
 

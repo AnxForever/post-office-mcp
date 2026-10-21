@@ -18,6 +18,7 @@ VERSION = MANIFEST["version"]
 MAJOR_MINOR = ".".join(VERSION.split(".")[:2])
 SKILL_ZIP = DIST / "post-office-monthly-reconciliation-skill.zip"
 AGENT_ZIP = DIST / f"邮局委办运输报表核对V{MAJOR_MINOR}-agent.zip"
+AGENTOS_ZIP = DIST / f"邮局委办运输报表核对V{MAJOR_MINOR}.agentos.zip"
 FIXED_ZIP_TIME = (2026, 7, 28, 0, 0, 0)
 
 
@@ -60,7 +61,7 @@ def build_agent_json(files: list[Path]) -> dict[str, object]:
             "name": f"邮局月度委办运输报表核对 V{MAJOR_MINOR}",
             "description": "通过受控 Skill 执行月度预检、人工核对和报表交付：车型汇总表 → 基础报表初版 → 人工闸门 → 拆分版 → 盈亏表",
             "icon": "[PO]",
-            "version": "6.2.0",
+            "version": VERSION,
             "category": "财务分析",
             "type": "general",
             "skills": [SKILL_NAME],
@@ -79,6 +80,20 @@ def build_agent_zip(payload: dict[str, object]) -> None:
         add_bytes(archive, "prompt.md", prompt)
 
 
+def build_agentos_zip(files: list[Path]) -> None:
+    """生成 AgentOS「导入专家」对话框可直接接受的包。
+
+    平台只认 agent/agent.yaml 结构；技能必须放在 agent/skills/<name>/ 下，
+    否则导入后任务启动会报「绑定技能未安装」。agent.json 导出格式不适用于导入。
+    """
+    with zipfile.ZipFile(AGENTOS_ZIP, "w") as archive:
+        add_bytes(archive, "agent/agent.yaml", (AGENT_ROOT / "agent.yaml").read_bytes())
+        add_bytes(archive, "agent/prompt.md", (AGENT_ROOT / "prompt.md").read_bytes())
+        for path in files:
+            relative = path.relative_to(SKILL_ROOT).as_posix()
+            add_bytes(archive, f"agent/skills/{SKILL_NAME}/{relative}", path.read_bytes())
+
+
 def main() -> None:
     files = source_files()
     required = {"SKILL.md", "manifest.json", "assets/split-report-template.xlsx"}
@@ -88,9 +103,11 @@ def main() -> None:
         raise ValueError(f"Skill 缺少必需文件: {', '.join(missing)}")
     build_skill_zip(files)
     build_agent_zip(build_agent_json(files))
+    build_agentos_zip(files)
     print(json.dumps({
         "skill_zip": str(SKILL_ZIP),
         "agent_zip": str(AGENT_ZIP),
+        "agentos_zip": str(AGENTOS_ZIP),
         "embedded_files": len(files),
     }, ensure_ascii=False))
 

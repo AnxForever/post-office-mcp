@@ -41,6 +41,7 @@ REQUIRED_SCRIPTS = (
     "reconciliation/model_summary.py",
     "reconciliation/monthly_comparison.py",
     "reconciliation/normalize.py",
+    "reconciliation/paths.py",
     "reconciliation/profit_audit.py",
     "reconciliation/template_discovery.py",
     "reconciliation/templates.py",

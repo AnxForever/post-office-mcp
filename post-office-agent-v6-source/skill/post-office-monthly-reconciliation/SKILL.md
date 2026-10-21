@@ -22,7 +22,8 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 2. 将当次动态 Excel 文件全部列入 `code.execute.inputFiles`。
 3. **运行任何业务脚本前，先执行 `--phase detect`**，确认每个文件被识别成什么角色。
    识别依据是表结构，不是文件名；返回 `ambiguous` 或 `missing` 时停下来问用户，
-   不要自己猜文件名，也不要用 `/inputs`、`/outputs`（平台没有这两个目录）。
+   不要自己猜文件名。上传目录随平台版本变化（旧版 `/workspace`，新版 `/inputs`），
+   脚本会自动解析并在 `--phase list` 的 `input_dir` 中返回真实位置。
 4. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
 5. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
 6. 如脚本返回 `ok:false`，原样汇报 `errors` 和 `next_action`，不绕过阻断。
@@ -131,7 +132,7 @@ sys.argv = [
     "run_workflow.py",
     "--phase", "final",
     "--workspace", "/workspace",
-    "--review-file", "/workspace/4月_02_基础报表初版.xlsx",
+    "--review-file", "<--phase detect 返回的初版真实路径>",
     "--bundle-root", "/workspace/skills/post-office-monthly-reconciliation",
 ]
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run_workflow.py", run_name="__main__")
