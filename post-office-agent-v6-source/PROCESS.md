@@ -379,6 +379,7 @@ agentos_entrypoint.py --phase <X>
 - **最终交付件必须复制到 `/outputs`**：AgentOS 只把 `/outputs` 下的文件登记成「成果文件」，
   写入 `/workspace/output` 的文件任务结束后不可下载。`reconciliation/paths.py` 的
   `publish_files` 负责复制，结果在 JSON 的 `published` 字段返回。
+  自建部署要换目录时设置 `POST_OFFICE_PUBLISH_DIR`；Windows 本地默认不发布。
 
 ---
 
@@ -471,11 +472,15 @@ python post-office-agent-v6-source/tests/test_skill.py --fast   # 跳过完整 r
 
 | 阶段 | 结果 |
 |---|---|
-| 导入专家 V6.2 | 导入成功，技能 `post-office-monthly-reconciliation` 绑定成功 |
+| 导入专家 V6.2 | 导入成功，技能 `post-office-monthly-reconciliation` v6.2.0 绑定成功 |
 | `--phase detect` | 16 个文件全部识别，8 类必需角色唯一命中，`missing`/`ambiguous` 为空 |
-| `--phase review` | 初版 1284 行，问题 23 条（缺容间 8 / 缺吨位 5 / 缺价格 4 / 缺路线 3 / 趟次未匹配 3） |
-| `--phase final` | 拆分版 1284 行；一干 18 路线 412 趟；二干 27 路线 651 趟；行数守恒全部通过 |
-| `--phase validate --stage final` | 12 项通过 11 项；唯一失败是「两趟合一趟」未生成（初版没有合并指令，属预期） |
+| `--phase review` | 初版 4309 行，车型表 3224 行，问题 1307 条；成果文件 2 个 |
+| `--phase final` | 拆分版 4309 行、101 个 Sheet；一干/二干盈亏表生成；`audit.validation_passed` 通过 |
+| 成果下载 | 5 个文件从「成果文件」下载成功，openpyxl 打开校验通过（拆分版明细行合计 4309） |
+
+4 月数据包当前包含 4309 条车管记录（此前 1284 条是另一份数据子集）。
+盈亏表会提示「财务记录未分类 3610 条」：这些是市趟/返程等不在
+一干/二干价格表里的路线，本来就不进盈亏表，属于提示而非错误。
 
 这次线上跑暴露了两个平台差异，都已修在 `reconciliation/paths.py`：
 

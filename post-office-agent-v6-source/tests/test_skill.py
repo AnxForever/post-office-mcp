@@ -437,6 +437,14 @@ def check_publish() -> None:
     # Windows 上 Path('/outputs') 会落到当前盘符根目录，必须拒绝。
     if sys.platform == "win32":
         record("publish: 本地不把盘符根目录当成果目录", resolve_publish_dir() is None)
+    # 自建部署可用环境变量指定成果目录。
+    with tempfile.TemporaryDirectory() as tmp:
+        override = Path(tmp) / "published"
+        os.environ["POST_OFFICE_PUBLISH_DIR"] = str(override)
+        try:
+            record("publish: 环境变量覆盖成果目录", resolve_publish_dir() == override)
+        finally:
+            os.environ.pop("POST_OFFICE_PUBLISH_DIR", None)
 
 
 def check_package() -> None:

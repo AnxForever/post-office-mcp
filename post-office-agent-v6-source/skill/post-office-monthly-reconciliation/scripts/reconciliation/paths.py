@@ -56,9 +56,18 @@ def resolve_input_dir(workspace: Path | str) -> Path:
 def resolve_publish_dir() -> Path | None:
     """返回平台成果目录；没有挂载或不可写时返回 None。
 
-    只在沙箱容器里生效：Windows 上 Path('/outputs') 会落到当前盘符根目录，
-    不能当平台目录用，否则本地跑一次就会往 C:\\outputs 写文件。
+    默认用 `/outputs`。自建部署或需要把成果放到别的目录时，设置环境变量
+    `POST_OFFICE_PUBLISH_DIR` 覆盖。Windows 上 Path('/outputs') 会落到当前
+    盘符根目录，不能当平台目录用，否则本地跑一次就会往 C:\\outputs 写文件。
     """
+    override = os.environ.get("POST_OFFICE_PUBLISH_DIR")
+    if override:
+        path = Path(override)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return path if os.access(path, os.W_OK) else None
+        except OSError:
+            return None
     if sys.platform == "win32":
         return None
     try:
