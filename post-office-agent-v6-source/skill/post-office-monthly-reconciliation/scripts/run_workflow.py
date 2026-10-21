@@ -13,7 +13,7 @@ from check_runtime import REQUIRED_REFERENCES, run_checks
 from inspect_inputs import inspect_inputs
 from validate_outputs import validate_outputs
 from reconciliation.integrity import file_sha256
-from reconciliation.paths import resolve_input_dir
+from reconciliation.paths import publish_files, resolve_input_dir
 
 
 class _TerminalArgumentParser(argparse.ArgumentParser):
@@ -32,6 +32,7 @@ def _terminal(
     warnings=(),
     errors=(),
     audit: dict[str, Any] | None = None,
+    published=(),
     next_action: str,
 ) -> dict[str, Any]:
     return {
@@ -40,6 +41,7 @@ def _terminal(
         "phase": phase,
         "target_month": target_month,
         "outputs": [str(Path(path)) for path in outputs],
+        "published": list(published),
         "metrics": metrics or {},
         "issues": issues or {},
         "warnings": list(warnings),
@@ -149,11 +151,13 @@ def _run_workflow(
                 errors=validation["errors"],
                 next_action="初版验证失败，请修复 Skill 后重新执行",
             )
+        published = publish_files([model_summary, review])
         return _terminal(
             True,
             "awaiting_review",
             target_month=state["target_month"],
             outputs=[model_summary, review],
+            published=published,
             metrics=state.get("metrics"),
             issues=state.get("issue_counts"),
             warnings=validation["warnings"],
@@ -201,16 +205,18 @@ def _run_workflow(
             audit=audit,
             next_action="最终文件验证失败，请修复 Skill 后重新执行",
         )
+    published = publish_files(outputs)
     return _terminal(
         True,
         "final_completed",
         target_month=state["target_month"],
         outputs=outputs,
+        published=published,
         metrics=state.get("final_metrics"),
         issues=state.get("issue_counts"),
         warnings=validation["warnings"],
         audit=audit,
-        next_action="请下载并交付三个最终月度报表",
+        next_action="请从「成果文件」下载并交付三个最终月度报表",
     )
 
 

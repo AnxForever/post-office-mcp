@@ -9,6 +9,7 @@ from pathlib import Path
 
 from reconciliation.excel_io import file_sha256, read_online_rows
 from reconciliation.model_summary import merge_online_rows, write_model_summary_workbook
+from reconciliation.paths import publish_files
 
 
 def build_model_summary(
@@ -45,6 +46,7 @@ def build_model_summary(
         "phase": "summary_completed",
         "target_month": month,
         "outputs": [str(output.resolve())],
+        "published": publish_files([output]),
         "metrics": {
             "online_rows": len(online_rows),
             "summary_rows": len(summary_rows),

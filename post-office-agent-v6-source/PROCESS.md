@@ -374,7 +374,11 @@ agentos_entrypoint.py --phase <X>
 - Windows 控制台必须设 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`，否则中文输出乱码。
 - 脚本内不使用 emoji，统一用 `[OK]` / `[STOP]`。
 - **Excel 打开文件时不要覆盖**，会写失败。
-- 输入在 `/workspace`，输出写 `/workspace/output`；不要用 `/inputs`、`/outputs`。
+- 输入：脚本自动解析，`workspace` 优先，`/inputs`、`/workspace/uploads`、`/mnt/data` 兜底。
+- 中间状态和 `run-state.json` 写 `/workspace/output`。
+- **最终交付件必须复制到 `/outputs`**：AgentOS 只把 `/outputs` 下的文件登记成「成果文件」，
+  写入 `/workspace/output` 的文件任务结束后不可下载。`reconciliation/paths.py` 的
+  `publish_files` 负责复制，结果在 JSON 的 `published` 字段返回。
 
 ---
 
@@ -473,9 +477,13 @@ python post-office-agent-v6-source/tests/test_skill.py --fast   # 跳过完整 r
 | `--phase final` | 拆分版 1284 行；一干 18 路线 412 趟；二干 27 路线 651 趟；行数守恒全部通过 |
 | `--phase validate --stage final` | 12 项通过 11 项；唯一失败是「两趟合一趟」未生成（初版没有合并指令，属预期） |
 
-这次线上跑暴露了一个平台差异：新版本把上传附件挂在只读的 `/inputs`，
-不再放 `/workspace`。技能已改为自动解析（`reconciliation/paths.py`），
-`--phase list` 的 `input_dir` 会返回真实位置。
+这次线上跑暴露了两个平台差异，都已修在 `reconciliation/paths.py`：
+
+1. 新版本把上传附件挂在只读的 `/inputs`，不再放 `/workspace`；
+   脚本按「workspace 优先、`/inputs` 兜底」解析，`--phase list` 的 `input_dir` 返回真实位置。
+2. `/workspace/output` 里的文件不会出现在任务「成果文件」里，也下载不到；
+   平台只登记 `/outputs`。脚本现在在 review/final/summary/profit 完成后把交付件复制到
+   `/outputs`，并在 JSON 的 `published` 里返回文件名。
 Windows 上偶发原生崩溃（0xC0000005）时脚本会自动重跑一次并打印 `[WARN]`；
 该问题的现状和已知边界见第九节。
 

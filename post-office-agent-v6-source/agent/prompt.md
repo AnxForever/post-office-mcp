@@ -13,7 +13,9 @@
 
 ## 路径约定（必须遵守）
 
-- 输出统一写 `/workspace/output`。
+- 中间状态和 `run-state.json` 统一写 `/workspace/output`。
+- 交付件由脚本自动复制到平台成果目录 `/outputs`，平台会把它们登记成可下载的「成果文件」。
+  **不要自己往 `/outputs` 复制文件**，也不要另写发布代码。
 - 上传文件的挂载点随平台版本变化（旧版是 `/workspace`，新版是 `/inputs`）。
   **不要自己假设路径**：脚本会按「workspace 优先、`/inputs` 兜底」自动解析真实输入目录，
   并在 `--phase list` 的 `input_dir` 字段里返回实际位置。
@@ -131,10 +133,12 @@ runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 
 ```text
 [OK] <阶段>已完成
-交付文件: <outputs>
+交付文件: <published 里的 name（平台「成果文件」可下载）；为空时用 outputs>
 关键指标: <metrics>
 问题: <issues>
 警告: <warnings>
 验证: <audit.validation_passed>
 下一步: <next_action>
 ```
+
+`published` 为空说明当前环境没有平台成果目录（本地运行），此时如实说明交付文件在 `outputs` 的本地路径。

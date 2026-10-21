@@ -412,6 +412,33 @@ def check_full_workflow() -> None:
         )
 
 
+def check_publish() -> None:
+    sys.path.insert(0, str(SKILL / "scripts"))
+    try:
+        from reconciliation.paths import publish_files, resolve_publish_dir
+    finally:
+        sys.path.pop(0)
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "4月_02_基础报表初版.xlsx"
+        source.write_bytes(b"xlsx")
+        target = Path(tmp) / "outputs"
+        published = publish_files([source, Path(tmp) / "missing.xlsx"], target)
+        record(
+            "publish: 交付件复制到成果目录",
+            [item["name"] for item in published] == [source.name]
+            and (target / source.name).read_bytes() == b"xlsx",
+            str(published),
+        )
+        record(
+            "publish: 缺失文件不报错",
+            len(published) == 1,
+            str(published),
+        )
+    # Windows 上 Path('/outputs') 会落到当前盘符根目录，必须拒绝。
+    if sys.platform == "win32":
+        record("publish: 本地不把盘符根目录当成果目录", resolve_publish_dir() is None)
+
+
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
     record("package: 版本 6.2.0", manifest.get("version") == "6.2.0", manifest.get("version", ""))
@@ -464,6 +491,7 @@ def main() -> int:
     check_list()
     check_inspect()
     check_profit()
+    check_publish()
     check_package()
     if not args.fast:
         check_full_workflow()

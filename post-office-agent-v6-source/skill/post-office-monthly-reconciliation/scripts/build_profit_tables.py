@@ -43,6 +43,8 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 
+from reconciliation.paths import publish_files
+
 SUMMARY_SHEETS = {"一干汇总", "二干基础"}
 NON_DETAIL_SHEETS = SUMMARY_SHEETS | {"两趟合一趟", "降吨位", "Sheet1", "Sheet2", "Sheet3", "Sheet4"}
 
@@ -890,6 +892,9 @@ def main(argv=None) -> int:
         })
 
     report["unmatched_samples"] = misses[:20]
+    report["published"] = publish_files(
+        Path(item["path"]) for item in report["outputs"]
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

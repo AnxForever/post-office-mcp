@@ -116,7 +116,7 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run
 
 当 `phase` 为 `awaiting_review` 时：
 
-- 向用户提供车型汇总表和基础报表初版。
+- 向用户提供车型汇总表和基础报表初版（`published` 里是平台「成果文件」中的文件名）。
 - 汇报 `metrics`、`issues` 和 `warnings`。
 - 立即停止，请用户人工核对初版中的颜色行与“问题汇总”。
 - 不自动继续生成拆分版或盈亏表。
@@ -141,6 +141,8 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run
 如用户上传了上月一干/二干盈亏表，分别增加 `--previous-first-profit` 和 `--previous-second-profit`。**未上传则环比区留空，严禁从模板或其他来源推测上月数据。**
 
 当 `phase` 为 `final_completed` 时，交付拆分版、一干盈亏表和二干盈亏表，并汇报校验结果。
+脚本会把这三个文件复制到平台成果目录 `/outputs`，在 `published` 中返回；平台「成果文件」
+是用户实际下载交付件的位置，不要让用户去 `/workspace/output` 找。
 
 官方基础报表母版中的“二干基础”“一干汇总”“两趟合一趟”等特殊 Sheet 也会按规则
 生成：二干基础按二干分类、 一干汇总按一干分类；两趟合一趟只接受人工在修订初版中
