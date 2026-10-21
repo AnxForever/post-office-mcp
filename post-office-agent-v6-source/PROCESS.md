@@ -482,6 +482,17 @@ python post-office-agent-v6-source/tests/test_skill.py --fast   # 跳过完整 r
 盈亏表会提示「财务记录未分类 3610 条」：这些是市趟/返程等不在
 一干/二干价格表里的路线，本来就不进盈亏表，属于提示而非错误。
 
+用户界面实测（同一实例，全程点 UI，不经 RPC）：
+
+- 新建任务 → 选中 V6.2 专家 → 输入要求 → 文件选择器附 16 个文件 → 发送。
+- 第一次发送：detect 成功，随后平台报「模型评估超时，已保留已完成结果」，review 没有执行；
+  在同一任务里补发一条「继续执行 review」后 52 秒完成。这是平台模型侧超时，不是 Skill 问题。
+- 消息显示「已发送 16 个文件」，detect 的 `file_count` 是 15：多出的
+  `4月_02_基础报表初版.xlsx` 被识别为 `base_draft`，模型没有把它列入 inputFiles，不是上传丢失。
+- 成果文件标签页正确显示 2 个文件。但「下载」按钮先 `await fetch(HEAD)` 再
+  `window.open`，浏览器会拦掉这个弹窗（实测 `window.open` 返回 null，无文件产生）；
+  artifacts 下载接口本身正常。前端应改成 `<a download>` 或同步打开窗口。
+
 这次线上跑暴露了两个平台差异，都已修在 `reconciliation/paths.py`：
 
 1. 新版本把上传附件挂在只读的 `/inputs`，不再放 `/workspace`；
