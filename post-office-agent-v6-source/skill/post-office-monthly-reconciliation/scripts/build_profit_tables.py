@@ -694,14 +694,19 @@ def _write(level, labels, route_order, base, income, out_path, year, month, tonn
             bucket[2] += freight
             bucket[3] += income_value
             bucket[4] += pnl
-        sheet.cell(row, summary_start,
-                   "=" + "+".join(f"{get_column_letter(2 + gi * 7)}{row}" for gi in range(group_count)))
-        sheet.cell(row, summary_start + 1,
-                   "=" + "+".join(f"{get_column_letter(2 + gi * 7 + 3)}{row}" for gi in range(group_count)))
-        sheet.cell(row, summary_start + 2,
-                   "=" + "+".join(f"{get_column_letter(2 + gi * 7 + 4)}{row}" for gi in range(group_count)))
-        sheet.cell(row, summary_start + 3,
-                   f"={get_column_letter(summary_start + 2)}{row}-{get_column_letter(summary_start + 1)}{row}")
+        # 汇总列写具体数值而不是公式：openpyxl 写的公式没有缓存值，
+        # Excel 会重算，但手机预览、微信预览、在线表格这类只读查看器
+        # 直接显示 0——对方看到的表就成了空的。
+        row_trips = sum(base.get((route, ton), [0, 0.0, 0.0])[0]
+                        for label in labels for ton in tonnage_map.get(label, [label]))
+        row_freight = sum(base.get((route, ton), [0, 0.0, 0.0])[2]
+                          for label in labels for ton in tonnage_map.get(label, [label]))
+        row_income = sum(income.get((route, ton), 0.0)
+                         for label in labels for ton in tonnage_map.get(label, [label]))
+        sheet.cell(row, summary_start, row_trips or None)
+        sheet.cell(row, summary_start + 1, round(row_freight, 2))
+        sheet.cell(row, summary_start + 2, round(row_income, 2))
+        sheet.cell(row, summary_start + 3, round(row_income - row_freight, 2))
         row += 1
 
     sheet.cell(row, 1, "合计").font = Font(name="宋体", bold=True, size=10)
@@ -719,14 +724,16 @@ def _write(level, labels, route_order, base, income, out_path, year, month, tonn
         ]
         for offset, value in enumerate(values):
             sheet.cell(row, start + offset, value)
-    for offset, name in enumerate(SUMMARY_HEADERS):
-        column = summary_start + offset
-        letter = get_column_letter(column)
-        if name == "总盈亏(元)":
-            sheet.cell(row, column,
-                       f"={get_column_letter(summary_start + 2)}{row}-{get_column_letter(summary_start + 1)}{row}")
-        else:
-            sheet.cell(row, column, f"=SUM({letter}4:{letter}{row - 1})")
+    total_trips = sum(totals[label][0] for label in labels)
+    total_freight = sum(totals[label][2] for label in labels)
+    total_income = sum(totals[label][3] for label in labels)
+    for offset, value in enumerate([
+        total_trips or None,
+        round(total_freight, 2),
+        round(total_income, 2),
+        round(total_income - total_freight, 2),
+    ]):
+        sheet.cell(row, summary_start + offset, value)
     total_row = row
 
     header_row = total_row + 3

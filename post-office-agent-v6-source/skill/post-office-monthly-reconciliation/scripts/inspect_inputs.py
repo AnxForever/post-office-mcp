@@ -70,7 +70,7 @@ BUNDLED_PAIRS = {
         "profit_candidate",
     ),
 }
-PACKAGE_VERSION = "6.2.5"
+PACKAGE_VERSION = "6.2.6"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:

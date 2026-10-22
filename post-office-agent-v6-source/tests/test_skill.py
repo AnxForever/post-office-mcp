@@ -729,7 +729,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.2.5", manifest.get("version") == "6.2.5", manifest.get("version", ""))
+    record("package: 版本 6.2.6", manifest.get("version") == "6.2.6", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
