@@ -283,7 +283,10 @@ def check_price_ambiguous() -> None:
         wb.close()
 
         payload = phase_detect(Path(tmp), "review", "2026-03", expect_complete=False)
-        roles = [item["role"] for item in payload.get("files", [])]
+        # 内置模板会出现在 files 里，这里只看用户实际上传的那份。
+        bundled = set(payload.get("bundled_templates") or [])
+        uploaded = [item for item in payload.get("files", []) if item["name"] not in bundled]
+        roles = [item["role"] for item in uploaded]
         record(
             "detect ambiguous: 未标注一干/二干时返回 candidate",
             roles == ["price_candidate"],
@@ -291,8 +294,8 @@ def check_price_ambiguous() -> None:
         )
         record(
             "detect ambiguous: 置信度为 low",
-            all(item["confidence"] == "low" for item in payload.get("files", [])),
-            str([(item["role"], item["confidence"]) for item in payload.get("files", [])]),
+            all(item["confidence"] == "low" for item in uploaded),
+            str([(item["role"], item["confidence"]) for item in uploaded]),
         )
         record(
             "detect ambiguous: 不静默选中价格表",
@@ -381,6 +384,29 @@ def check_runpy_host_survives() -> None:
         "runpy: 宿主进程存活（入口不 os._exit）",
         "HOST_ALIVE" in proc.stdout,
         f"exit={proc.returncode} stderr={proc.stderr[-300:]!r}",
+    )
+
+
+def check_error_messages_readable() -> None:
+    """MemoryError 的 str() 是空串，入口不能把它上报成 errors:[""]。"""
+    code = (
+        "import sys\n"
+        "sys.path.insert(0, 'scripts')\n"
+        "from run_workflow import _describe_exception\n"
+        "for exc in (MemoryError(), RuntimeError()):\n"
+        "    text = _describe_exception(exc)\n"
+        "    assert text.strip(), type(exc).__name__\n"
+        "print('READABLE')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(SKILL), env=ENV, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    record(
+        "错误上报: 空异常信息不会变成空串",
+        "READABLE" in proc.stdout,
+        f"exit={proc.returncode} {proc.stderr[-200:]!r}",
     )
 
 
@@ -565,6 +591,107 @@ def check_full_workflow() -> None:
         )
 
 
+def check_bundled_templates() -> None:
+    """三份版式模板随包内置：用户不传模板时，完整流程仍要能跑完。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp) / "workspace"
+        shutil.copytree(APRIL, workspace)
+        removed = []
+        for name in ("基础报表初版模板.xlsx", "一干委办盈亏.xlsx", "二干委办盈亏.xlsx"):
+            path = workspace / name
+            if path.is_file():
+                path.unlink()
+                removed.append(name)
+        record("bundled: 测试前删除三份模板", len(removed) == 3, str(removed))
+
+        payload = phase_detect(workspace, "review", "2026-04")
+        missing = payload.get("missing") or []
+        record(
+            "bundled: 模板缺失不算缺文件",
+            "first_profit_template" not in missing and "second_profit_template" not in missing,
+            str(missing),
+        )
+        record(
+            "bundled: detect 报告使用内置模板",
+            set(payload.get("bundled_templates") or [])
+            == {"draft-template.xlsx", "first-profit-template.xlsx", "second-profit-template.xlsx"},
+            str(payload.get("bundled_templates")),
+        )
+
+        _, review = run_phase(
+            "--phase", "review", "--workspace", str(workspace),
+            "--month", "2026-04", "--bundle-root", str(SKILL),
+        )
+        record(
+            "bundled: review 用内置初版模板生成初版",
+            review.get("phase") == "awaiting_review",
+            f"{review.get('phase')} {str(review.get('errors'))[:300]}",
+        )
+        if review.get("phase") != "awaiting_review":
+            return
+
+        review_file = workspace / "output" / "4月_02_基础报表初版.xlsx"
+        _, final = run_phase(
+            "--phase", "final", "--workspace", str(workspace),
+            "--review-file", str(review_file), "--bundle-root", str(SKILL),
+        )
+        outputs = [Path(item).name for item in final.get("outputs", [])]
+        record(
+            "bundled: final 用内置盈亏模板产出三件",
+            final.get("phase") == "final_completed" and len(outputs) == 3,
+            f"{final.get('phase')} {outputs} {str(final.get('errors'))[:200]}",
+        )
+
+
+def check_bundled_prices() -> None:
+    """合同价格表也随包内置：用户不传时用内置版本，并在结果里说明。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp) / "workspace"
+        shutil.copytree(APRIL, workspace)
+        removed = []
+        for name in ("2024年10月新一干价格表(1).xlsx", "二干运费价.xlsx"):
+            path = workspace / name
+            if path.is_file():
+                path.unlink()
+                removed.append(name)
+        record("bundled: 测试前删除两份价格表", len(removed) == 2, str(removed))
+
+        payload = phase_detect(workspace, "review", "2026-04")
+        missing = payload.get("missing") or []
+        record(
+            "bundled: 价格表缺失不算缺文件",
+            "first_price" not in missing and "second_price" not in missing,
+            str(missing),
+        )
+        record(
+            "bundled: detect 报告使用内置价格表",
+            set(payload.get("bundled_price_tables") or [])
+            == {"first-price-table.xlsx", "second-price-table.xlsx"},
+            str(payload.get("bundled_price_tables")),
+        )
+        # 内置价格表必须能读出档位和路线，否则等于没内置。
+        sys.path.insert(0, str(SKILL / "scripts"))
+        try:
+            from reconciliation.excel_io import read_price_catalog
+
+            assets = SKILL / "assets"
+            first = read_price_catalog(assets / "first-price-table.xlsx", "first")
+            second = read_price_catalog(assets / "second-price-table.xlsx", "second")
+        finally:
+            if str(SKILL / "scripts") in sys.path:
+                sys.path.remove(str(SKILL / "scripts"))
+        record(
+            "bundled: 内置一干价格表可解析",
+            len(first.get("tiers") or []) >= 4 and len(first.get("routes") or {}) > 50,
+            f"tiers={len(first.get('tiers') or [])} routes={len(first.get('routes') or {})}",
+        )
+        record(
+            "bundled: 内置二干价格表可解析",
+            len(second.get("tiers") or []) >= 7 and len(second.get("routes") or {}) > 10,
+            f"tiers={len(second.get('tiers') or [])} routes={len(second.get('routes') or {})}",
+        )
+
+
 def check_publish() -> None:
     sys.path.insert(0, str(SKILL / "scripts"))
     try:
@@ -602,7 +729,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.2.3", manifest.get("version") == "6.2.3", manifest.get("version", ""))
+    record("package: 版本 6.2.5", manifest.get("version") == "6.2.5", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
@@ -649,6 +776,7 @@ def main() -> int:
     check_detect_wrong_month()
     check_partial_upload_flow()
     check_runpy_host_survives()
+    check_error_messages_readable()
     check_online_site_by_structure()
     check_list()
     check_inspect()
@@ -658,6 +786,8 @@ def main() -> int:
     check_package()
     if not args.fast:
         check_full_workflow()
+        check_bundled_templates()
+        check_bundled_prices()
 
     failed = [name for name, ok, _ in RESULTS if not ok]
     print("-" * 60)

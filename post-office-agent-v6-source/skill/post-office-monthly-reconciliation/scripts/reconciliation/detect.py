@@ -427,6 +427,7 @@ def _phase_roles(phase: str) -> dict[str, int] | None:
             "online_gangwu": 1,
             "vehicle": _vehicle_count(),
             "finance": 1,
+            "draft_template": 1,
             "first_price": 1,
             "second_price": 1,
             "first_profit_template": 1,
@@ -435,17 +436,108 @@ def _phase_roles(phase: str) -> dict[str, int] | None:
     return None
 
 
+# 版式模板和合同价格表都是半年甚至整年才换一次，客户上传了就用客户的（可能更新），
+# 没上传就用包里的。动态数据（在线表、车管、财务）仍然必须每月上传。
+BUNDLED_INPUT_ASSETS = {
+    "draft_template": "draft-template.xlsx",
+    "first_profit_template": "first-profit-template.xlsx",
+    "second_profit_template": "second-profit-template.xlsx",
+    "first_price": "first-price-table.xlsx",
+    "second_price": "second-price-table.xlsx",
+}
+# 旧名字保留给已有调用方（inspect_inputs 只需 templates 子集）。
+BUNDLED_TEMPLATE_ASSETS = {
+    role: name
+    for role, name in BUNDLED_INPUT_ASSETS.items()
+    if role.endswith("_template")
+}
+PRICE_ROLES = ("first_price", "second_price")
+# 一干/二干是成套的：只要用户传了其中一份（或传了一份分不出干线的候选），
+# 就不能再拿内置的另一份凑数，否则等于把两版合同混着用。
+BUNDLED_PAIRS = {
+    "first_price": ("first_price", "second_price", "price_candidate"),
+    "second_price": ("first_price", "second_price", "price_candidate"),
+    "first_profit_template": (
+        "first_profit_template",
+        "second_profit_template",
+        "profit_candidate",
+    ),
+    "second_profit_template": (
+        "first_profit_template",
+        "second_profit_template",
+        "profit_candidate",
+    ),
+}
+
+
+def bundled_asset_path(role: str, assets_dir: Path | str | None = None) -> Path | None:
+    """返回内置资产路径；该角色没有内置版本时返回 None。"""
+    name = BUNDLED_INPUT_ASSETS.get(role)
+    if not name:
+        return None
+    root = Path(assets_dir) if assets_dir else Path(__file__).resolve().parents[2] / "assets"
+    path = root / name
+    return path if path.is_file() else None
+
+
+def _with_bundled_inputs(
+    detected: list,
+    roles: dict[str, int],
+    assets_dir: Path | str | None = None,
+    include_prices: bool = True,
+) -> tuple[list, list[str]]:
+    """为缺失的模板/价格表角色补上内置资产，用户不必每月重复上传。"""
+    merged = list(detected)
+    bundled: list[str] = []
+    # 只看用户实际上传了什么：刚补进去的内置资产不算「已上传」，否则一干补齐后
+    # 二干就会被当成「用户已有」而漏补。
+    uploaded_roles = {item.role for item in detected}
+    for role in roles:
+        if role not in BUNDLED_INPUT_ASSETS:
+            continue
+        if not include_prices and role in PRICE_ROLES:
+            continue
+        if any(item.role == role for item in merged):
+            continue
+        related = BUNDLED_PAIRS.get(role)
+        if related and uploaded_roles & set(related):
+            # 用户已经传了这一套里的某一份（或一份分不出干线的候选），
+            # 交给 resolve 报缺/报歧义，不要用内置版本悄悄补齐。
+            continue
+        path = bundled_asset_path(role, assets_dir)
+        if path is None:
+            continue
+        item = detect_file(path)
+        # 内置资产的角色是确定的，不再靠表内标题猜一干/二干。
+        item.role = role
+        item.confidence = "high"
+        item.evidence.append(
+            "使用 Skill 内置价格表" if role in PRICE_ROLES else "使用 Skill 内置模板"
+        )
+        merged.append(item)
+        bundled.append(path.name)
+    return merged, bundled
+
+
 def detect_for_phase(workspace: Path | str, month: str | None, phase: str) -> dict:
     roles = _phase_roles(phase)
     if roles is None:
         raise ValueError(f"不支持的阶段: {phase}")
-    detected = detect_workspace(workspace, month)
+    uploaded = detect_workspace(workspace, month)
+    detected, bundled = _with_bundled_inputs(uploaded, roles)
     resolution = resolve(detected, roles)
+    bundled_prices = [
+        name for name in bundled
+        if name in {BUNDLED_INPUT_ASSETS[role] for role in PRICE_ROLES}
+    ]
     return {
         "phase": phase,
         "target_month": month,
         "workspace": str(Path(workspace).resolve()),
-        "file_count": len(detected),
+        "file_count": len(uploaded),
+        "bundled_inputs": bundled,
+        "bundled_templates": [name for name in bundled if name not in bundled_prices],
+        "bundled_price_tables": bundled_prices,
         "required_roles": {role: count for role, count in roles.items()},
         "files": [item.to_dict() for item in detected],
         **resolution,

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from reconciliation.detect import refine_profiles
+from reconciliation.detect import bundled_asset_path, refine_profiles
 from reconciliation.excel_io import (
     classify_workbook,
     discover_workbooks,
@@ -44,7 +44,33 @@ REQUIRED_ROLES = {
     "first_profit_template": 1,
     "second_profit_template": 1,
 }
-PACKAGE_VERSION = "6.2.3"
+# 版式模板和合同价格表随包内置，角色固定；模板含全年页签、价格表只有单程/往返两页，
+# 都不参与目标月份推断，也不该因为客户没上传而被判成「缺文件」。
+MONTH_AGNOSTIC_ROLES = (
+    "draft_template",
+    "first_profit_template",
+    "second_profit_template",
+    "first_price",
+    "second_price",
+)
+PRICE_ROLES = ("first_price", "second_price")
+# 一干/二干成套使用：用户传了其中一份或一份分不出干线的候选时，
+# 不再用内置的另一份补齐，避免两版合同混用。
+BUNDLED_PAIRS = {
+    "first_price": ("first_price", "second_price", "price_candidate"),
+    "second_price": ("first_price", "second_price", "price_candidate"),
+    "first_profit_template": (
+        "first_profit_template",
+        "second_profit_template",
+        "profit_candidate",
+    ),
+    "second_profit_template": (
+        "first_profit_template",
+        "second_profit_template",
+        "profit_candidate",
+    ),
+}
+PACKAGE_VERSION = "6.2.5"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:
@@ -146,14 +172,36 @@ def inspect_inputs(
     by_role: dict[str, list[Any]] = {}
     for profile in profiles:
         by_role.setdefault(profile.role, []).append(profile)
-    # 初版模板是可选的：没有上传时由 build_review_workbook 回落到内置 assets/draft-template.xlsx。
-    # integrity.DYNAMIC_ROLE_COUNTS 要求该角色必须存在，所以这里补一条指向内置模板的条目。
+    # 版式模板和合同价格表是可选的：没有上传时用内置 assets 里的版本
+    # （初版模板、一干/二干盈亏模板、一干/二干价格表）。
+    # integrity.DYNAMIC_ROLE_COUNTS 要求这些角色必须存在，所以缺哪个就补一条指向内置资产的条目；
+    # 用户上传了则以用户的为准（可能是新版式或新合同）。
     package_dir = Path(__file__).resolve().parents[1]
     assets_root = Path(assets_dir) if assets_dir else package_dir / "assets"
-    if "draft_template" not in by_role:
-        bundled = assets_root / "draft-template.xlsx"
-        if bundled.is_file():
-            by_role["draft_template"] = [classify_workbook(bundled)]
+    # 与 detect 一致：只看用户实际上传的角色，刚补进去的内置资产不算已上传。
+    uploaded_roles = {profile.role for profile in profiles}
+    for role in MONTH_AGNOSTIC_ROLES:
+        if by_role.get(role):
+            continue
+        related = BUNDLED_PAIRS.get(role)
+        if related and uploaded_roles & set(related):
+            # 用户已上传这一套里的某一份（或无法区分干线的候选），
+            # 让缺少/歧义照常报出来，不要用内置版本掩盖。
+            continue
+        bundled = bundled_asset_path(role, assets_root)
+        if bundled is None:
+            continue
+        profile = classify_workbook(bundled)
+        # 内置资产的角色是确定的，不靠表内标题猜一干/二干。
+        profile.role = role
+        by_role[role] = [profile]
+        if role in PRICE_ROLES:
+            warnings.append(
+                f"未上传{ROLE_LABELS[role]}，使用 Skill 内置价格表（{bundled.name}）；"
+                "合同调价后请上传新版覆盖"
+            )
+        elif role != "draft_template":
+            warnings.append(f"未上传{ROLE_LABELS[role]}，使用 Skill 内置模板")
     roles_required = dict(REQUIRED_ROLES, draft_template=1)
     active_profiles = {role: by_role.get(role, []) for role in roles_required}
     ignored_models = by_role.get("model", [])
@@ -215,6 +263,9 @@ def inspect_inputs(
     online_profiles: list[Any] = []
     for profile in profiles:
         if profile.role not in REQUIRED_ROLES:
+            continue
+        # 模板类工作簿自带全年页签，不能拿来推断目标月份。
+        if profile.role in MONTH_AGNOSTIC_ROLES:
             continue
         if profile.role in {"online_caotan", "online_gangwu"}:
             online_profiles.append(profile)

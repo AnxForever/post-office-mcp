@@ -14,6 +14,12 @@ REQUIRED_ASSETS = (
     "split-report-template.xlsx",
     "company-map.json",
     "route-aliases.json",
+    # 内置版式模板和合同价格表，缺了就等于每月都要用户重新上传。
+    "draft-template.xlsx",
+    "first-profit-template.xlsx",
+    "second-profit-template.xlsx",
+    "first-price-table.xlsx",
+    "second-price-table.xlsx",
 )
 
 REVIEW_ASSETS = REQUIRED_ASSETS

@@ -17,6 +17,12 @@ REQUIRED_ASSETS = (
     "split-report-template.xlsx",
     "route-aliases.json",
     "company-map.json",
+    # 版式模板和合同价格表随包内置：客户不上传时直接用它，上传了则用客户的。
+    "draft-template.xlsx",
+    "first-profit-template.xlsx",
+    "second-profit-template.xlsx",
+    "first-price-table.xlsx",
+    "second-price-table.xlsx",
 )
 
 PHASE_ONE_ASSETS = REQUIRED_ASSETS

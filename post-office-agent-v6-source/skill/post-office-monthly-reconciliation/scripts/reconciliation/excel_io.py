@@ -563,12 +563,25 @@ def _number_from_cell(ws, row: int, column: int) -> float | int | None:
             if base is not None:
                 calculated = Decimal(str(base)) * Decimal(match.group(3))
                 return float(calculated) if calculated % 1 else int(calculated)
+    if isinstance(value, str):
+        # 2026 版一干表把里程写成「1088公里」，前面是数就是里程数。
+        match = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*(?:公里|km|KM)?\s*$", value)
+        if match:
+            return float(match.group(1))
     return None
 
 
 def _extract_first_number(value: Any) -> float | None:
+    """容间下限。两种写法都要认：
+
+    2024 版价格表写「≥55立方米」，2026 版二干合同写「55m³≤R」，
+    含义相同，都是「容积下限 55」。
+    """
     text = normalize_text(value)
     match = re.search(r"(?:≥|>=)\s*(\d+(?:\.\d+)?)", text)
+    if match:
+        return float(match.group(1))
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m3|m³|立方米|方)?\s*(?:≤|<=)", text)
     if not match:
         return None
     return float(match.group(1))
@@ -586,14 +599,149 @@ def _extract_coefficient(value: Any, allow_unlabeled_number: bool = False) -> fl
     return coefficient if 0 < coefficient <= 2 else None
 
 
-def _price_header_positions(ws) -> tuple[dict[str, int] | None, dict[str, int] | None]:
+def _price_header_positions(
+    ws,
+) -> tuple[dict[str, int] | None, dict[str, int] | None, list[int]]:
+    """返回 (路线列, 里程列, 其余路线列)。
+
+    2026 版一干表同时给了全称「西安市-北京市」和简称「西安-北京」两列，
+    两者都要能当路线名用，否则车管里的「西安-北京」匹配不上价格表。
+    """
     for row in range(1, min(ws.max_row, 30) + 1):
         values = [ws.cell(row, column).value for column in range(1, ws.max_column + 1)]
-        route_column = _find_header_column(values, tuple(PRICE_ROUTE_HEADERS))
+        route_columns = [
+            column
+            for column, value in enumerate(values, 1)
+            if value is not None and _header_key(value) in {_header_key(item) for item in PRICE_ROUTE_HEADERS}
+        ]
         distance_column = _find_header_column(values, ("路向里程", "公里（KM）", "公里", "里程"))
-        if route_column and distance_column:
-            return {"row": row, "column": route_column}, {"row": row, "column": distance_column}
-    return None, None
+        if route_columns and distance_column:
+            return (
+                {"row": row, "column": route_columns[0]},
+                {"row": row, "column": distance_column},
+                {"row": row, "columns": route_columns[1:]},
+            )
+    return None, None, {"row": 0, "columns": []}
+
+
+# 2026 版一干表把档位改成每 5m³ 一档：「[55,60)」「[60.65)」（表里逗号有时候写成点）。
+_PRICE_BAND_RE = re.compile(r"[\[\(]\s*(\d+(?:\.\d+)?)\s*[,.]\s*(\d+(?:\.\d+)?)\s*[\)\]]")
+
+
+def _band_range(value: Any) -> tuple[float, float] | None:
+    text = normalize_text(value)
+    match = _PRICE_BAND_RE.search(text)
+    if not match:
+        return None
+    low, high = float(match.group(1)), float(match.group(2))
+    return (low, high) if high > low else None
+
+
+def _is_banded_sheet(ws, header_row: int, distance_column: int) -> bool:
+    """档位头写成 [55,60) 这种容积区间，就是 2026 版「每 5m³ 一档」价目表。"""
+    found = 0
+    for column in range(distance_column + 1, ws.max_column + 1):
+        for row in range(header_row, min(ws.max_row, header_row + 4) + 1):
+            if _band_range(ws.cell(row, column).value):
+                found += 1
+                break
+    return found >= 2
+
+
+def _row_with_label(ws, header_row: int, label: str) -> int | None:
+    """找写着「吨位」这一类标题的行（它可能在里程列右边，如 2026 版一干表）。"""
+    for row in range(header_row, min(ws.max_row, header_row + 5) + 1):
+        for column in range(1, ws.max_column + 1):
+            if _header_key(ws.cell(row, column).value) == label:
+                return row
+    return None
+
+
+def _first_data_row(ws, header_row: int, route_column: int) -> int:
+    for row in range(header_row + 1, ws.max_row + 1):
+        text = normalize_text(ws.cell(row, route_column).value)
+        if text and text not in PRICE_ROUTE_HEADERS:
+            return row
+    return header_row + 1
+
+
+def _banded_tier_headers(
+    ws,
+    header_row: int,
+    route_column: int,
+    distance_column: int,
+    cached_rows: dict[int, tuple] | None = None,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """解析「每 5m³ 一档」的价目表。
+
+    档位信息分散在四行：吨位区间（如 12-13）、方量区间（如 [60,65)）、
+    档位下限数字、系数。系数是数据行上方最后一个数字，表里不写「系数」二字。
+    吨位取该档区间的上限（[60,65) → 13），与表头「12吨（≥55m³）」的写法一致。
+    """
+    if not _is_banded_sheet(ws, header_row, distance_column):
+        return None
+    tonnage_row = _row_with_label(ws, header_row, "吨位")
+    data_start = _first_data_row(ws, header_row, route_column)
+    tiers: list[dict[str, Any]] = []
+    last_row = min(ws.max_row, header_row + 5)
+    for column in range(distance_column + 1, ws.max_column + 1):
+        band = None
+        for row in range(header_row, last_row + 1):
+            band = _band_range(ws.cell(row, column).value)
+            if band:
+                break
+        if band:
+            min_volume, max_volume = band
+        else:
+            # 往返页前三档只写了「5吨（≥35m³）」，没写方量区间。
+            min_volume = _extract_first_number(ws.cell(header_row, column).value)
+            max_volume = None
+            if min_volume is None:
+                continue
+        label = ""
+        if tonnage_row:
+            label = normalize_text(ws.cell(tonnage_row, column).value)
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:吨)?\s*$", label) or re.search(
+            r"(\d+(?:\.\d+)?)", label
+        )
+        key = tonnage_key(match.group(1)) if match else ""
+        if not key:
+            key = tonnage_key(min_volume)
+        coefficient = None
+        coefficient_row = None
+        for row in range(data_start - 1, header_row, -1):
+            # 系数列常写成公式（=0.65+(M5-55)/5*0.024），公式本身取不到数值，
+            # 所以还要看 data_only 读出来的缓存值。
+            number = _number_from_cell(ws, row, column)
+            if number is None and cached_rows:
+                cached = cached_rows.get(row) or ()
+                value = cached[column - 1] if column - 1 < len(cached) else None
+                number = _to_number(value)
+            if number is not None and 0 < float(number) <= 2:
+                coefficient = float(number)
+                coefficient_row = row
+                break
+        if coefficient is None:
+            continue
+        tiers.append({
+            "key": key,
+            "column": column,
+            "tonnage_row": tonnage_row,
+            "threshold_row": None,
+            "coefficient_row": coefficient_row,
+            "min_volume": min_volume,
+            "max_volume": max_volume,
+            "coefficient": coefficient,
+        })
+    if not tiers:
+        return None
+    # 没写上限的档位（往返页前三档）用下一档的下限补齐；最后一档是开区间。
+    for index, tier in enumerate(tiers):
+        if tier.get("max_volume") is not None:
+            continue
+        following = tiers[index + 1] if index + 1 < len(tiers) else None
+        tier["max_volume"] = following["min_volume"] if following else None
+    return tiers, data_start
 
 
 def _price_tier_header(
@@ -663,17 +811,26 @@ def _special_price_columns(ws, header_row: int, distance_column: int) -> dict[in
 
 def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
     wb = load_workbook(path, read_only=False, data_only=False, keep_links=False)
+    # 档位系数常是公式，再读一份缓存值用于还原系数。
+    # 用只读模式，避免把整张价目表再占一份内存（客户价目表最大近 200 列 × 上百行）。
+    try:
+        cached_wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    except Exception:
+        cached_wb = None
     catalog: dict[str, Any] = {"kind": kind, "tiers": [], "routes": {}, "sheets": []}
     tier_definitions: dict[str, dict[str, Any]] = {}
     try:
         for ws in wb.worksheets:
             if ws.max_row < 4 or ws.max_column < 4:
                 continue
-            route_header, distance_header = _price_header_positions(ws)
+            route_header, distance_header, alt_route_header = _price_header_positions(ws)
             if not route_header or not distance_header:
                 continue
             header_row = route_header["row"]
             route_column = route_header["column"]
+            alt_route_columns = [
+                column for column in alt_route_header.get("columns", []) if column
+            ]
             distance_column = distance_header["column"]
             # 「往返」是独立 Sheet（一干价目表）：整页价格都是往返价，
             # 不能覆盖同路线在「单程」页的价格。
@@ -689,33 +846,57 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
             }
             tier_headers: list[dict[str, Any]] = []
             seen_keys: set[str] = set()
-            for column in range(distance_column + 1, ws.max_column + 1):
-                tier_header = _price_tier_header(ws, column, header_row, numeric_coefficient_rows)
-                if not tier_header:
+            cached_rows: dict[int, tuple] = {}
+            if cached_wb is not None and ws.title in cached_wb.sheetnames:
+                cached_sheet = cached_wb[ws.title]
+                for row in cached_sheet.iter_rows(
+                    min_row=header_row, max_row=header_row + 6, values_only=True
+                ):
+                    cached_rows[header_row + len(cached_rows)] = row
+            banded = _banded_tier_headers(
+                ws, header_row, route_column, distance_column, cached_rows
+            )
+            if banded:
+                tier_headers, data_start = banded
+                for tier_header in tier_headers:
+                    key = tier_header["key"]
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    tier_definitions.setdefault(key, {
+                        "key": key,
+                        "min_volume": tier_header["min_volume"],
+                        "max_volume": tier_header["max_volume"],
+                        "coefficient": tier_header["coefficient"],
+                    })
+            else:
+                for column in range(distance_column + 1, ws.max_column + 1):
+                    tier_header = _price_tier_header(ws, column, header_row, numeric_coefficient_rows)
+                    if not tier_header:
+                        continue
+                    key = tier_header["key"]
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    tier_headers.append(tier_header)
+                    tier_definitions.setdefault(key, {
+                        "key": key,
+                        "min_volume": tier_header["min_volume"],
+                        "coefficient": tier_header["coefficient"],
+                    })
+                if not tier_headers:
                     continue
-                key = tier_header["key"]
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                tier_headers.append(tier_header)
-                tier_definitions.setdefault(key, {
-                    "key": key,
-                    "min_volume": tier_header["min_volume"],
-                    "coefficient": tier_header["coefficient"],
-                })
-            if not tier_headers:
-                continue
-            data_start = max(
-                max(item[row_key] for item in tier_headers)
-                for row_key in ("tonnage_row", "threshold_row", "coefficient_row")
-            ) + 1
+                data_start = max(
+                    max(item[row_key] for item in tier_headers)
+                    for row_key in ("tonnage_row", "threshold_row", "coefficient_row")
+                ) + 1
             catalog["sheets"].append({
                 "sheet": ws.title,
                 "round_trip": sheet_round_trip,
                 "route_header": route_header,
                 "distance_header": distance_header,
                 "tier_headers": [
-                    {key: item[key] for key in ("key", "column", "tonnage_row", "threshold_row", "coefficient_row")}
+                    {key: item.get(key) for key in ("key", "column", "tonnage_row", "threshold_row", "coefficient_row")}
                     for item in tier_headers
                 ],
                 "data_start_row": data_start,
@@ -732,6 +913,10 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
                     continue
                 populated_route_seen = True
                 blank_route_count = 0
+                # 全称列（西安市-北京市）和简称列（西安-北京）都是合法路线名。
+                alt_routes = [
+                    normalize_text(ws.cell(row, column).value) for column in alt_route_columns
+                ]
                 distance = _number_from_cell(ws, row, distance_column)
                 prices = {
                     item["key"]: _number_from_cell(ws, row, item["column"])
@@ -760,6 +945,9 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
                             "kind": kind,
                         }
                     entry.setdefault("round_trip_prices", {}).update(prices)
+                    for name in alt_routes:
+                        if name and name != route:
+                            catalog["routes"].setdefault(name, entry)
                     continue
                 entry = catalog["routes"].get(route)
                 if entry is None:
@@ -775,8 +963,13 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
                     entry.setdefault("round_trip_prices", {}).update(round_trip_prices)
                 if return_prices:
                     entry.setdefault("return_prices", {}).update(return_prices)
+                for name in alt_routes:
+                    if name and name != route:
+                        catalog["routes"].setdefault(name, entry)
     finally:
         wb.close()
+        if cached_wb is not None:
+            cached_wb.close()
     catalog["tiers"] = sorted(tier_definitions.values(), key=lambda item: (item["min_volume"], item["key"]))
     return catalog
 

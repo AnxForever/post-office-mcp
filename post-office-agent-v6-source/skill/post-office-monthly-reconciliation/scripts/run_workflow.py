@@ -21,6 +21,13 @@ class _TerminalArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
+def _describe_exception(exc: BaseException) -> str:
+    """错误信息必须可读：MemoryError 这类异常的 str() 是空串，直接上报等于没报。"""
+    if isinstance(exc, MemoryError):
+        return "内存不足，工作簿读取被中断；请关闭占用内存的程序后重试（未生成任何交付件）"
+    return str(exc) or type(exc).__name__
+
+
 def _terminal(
     ok: bool,
     phase: str,
@@ -327,7 +334,7 @@ def run_workflow(
         return _terminal(
             False,
             "failed",
-            errors=[str(exc)],
+            errors=[_describe_exception(exc)],
             next_action="请根据错误修正输入或重新部署完整 Skill",
         )
 
@@ -358,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _terminal(
             False,
             "failed",
-            errors=[str(exc)],
+            errors=[_describe_exception(exc)],
             next_action="请根据错误修正输入或重新部署完整 Skill",
         )
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

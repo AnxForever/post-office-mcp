@@ -140,6 +140,7 @@ def _baseline_price(
     route_info: Mapping[str, Any],
     catalog: Mapping[str, Any],
     fallback: Any,
+    key: str = "",
 ) -> Any:
     """Return the contract base price (the tier whose coefficient is 1.0).
 
@@ -158,7 +159,19 @@ def _baseline_price(
         if value not in (None, ""):
             return value
         return fallback
-    return fallback
+    # 2026 版一干表每 5m³ 一档，没有系数正好等于 1 的档位。
+    # 官方「标准价」是系数 1 对应的合同价，用「运价 ÷ 系数」还原。
+    return _base_from_coefficient(fallback, _tier_coefficient(catalog, key))
+
+
+def _base_from_coefficient(value: Any, coefficient: Decimal) -> Any:
+    if value in (None, "") or not coefficient:
+        return value
+    try:
+        base = (Decimal(str(value)) / coefficient).quantize(Decimal("0.01"))
+    except Exception:
+        return value
+    return float(base) if base % 1 else int(base)
 
 
 def _round_trip_price(
@@ -199,12 +212,18 @@ def _round_trip_price(
     direct = prices.get(key)
     if direct not in (None, ""):
         freight = Decimal(str(direct))
-    else:
-        try:
-            # 二干只给 12 吨往返价，其余档位由系数折算；官方保留两位小数。
-            freight = (base_decimal * Decimal(str(coefficient)) / base_coefficient).quantize(Decimal("0.01"))
-        except Exception:
-            return None
+        # 2026 版一干表没有系数 1 的档位，标准价要用本档「运价 ÷ 系数」还原，
+        # 不能拿第一档（2.75 吨）的价当基准。
+        if base_key != key:
+            standard = _base_from_coefficient(direct, _tier_coefficient(catalog, key))
+        else:
+            standard = direct
+        return standard, freight
+    try:
+        # 二干只给 12 吨往返价，其余档位由系数折算；官方保留两位小数。
+        freight = (base_decimal * Decimal(str(coefficient)) / base_coefficient).quantize(Decimal("0.01"))
+    except Exception:
+        return None
     return base_value, freight
 
 
@@ -225,6 +244,15 @@ def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[
             minimum = Decimal(str(tier["min_volume"]))
         except Exception:
             continue
+        # 2026 版一干表按「[55,60)」这种容积区间分档，上限是开区间；
+        # 老表只有下限（≥55），没有 max_volume。
+        maximum = tier.get("max_volume")
+        if maximum is not None:
+            try:
+                if volume_number >= Decimal(str(maximum)):
+                    continue
+            except Exception:
+                pass
         if volume_number >= minimum:
             eligible.append((minimum, tier))
     return max(eligible, key=lambda item: item[0])[1] if eligible else None
@@ -351,7 +379,7 @@ def match_price(
         )
     # 价格表单元格已经是"标准价×系数"，直接作为运价；再乘一次系数会把
     # 12吨一干价压低 37%、40吨二干价抬高 72%。
-    standard = _baseline_price(route_info, catalog, tier_price)
+    standard = _baseline_price(route_info, catalog, tier_price, key)
     freight = float(tier_price)
     return PriceMatch(
         kind=resolved_kind,
