@@ -23,14 +23,50 @@ def build_model_summary(
     except ValueError as exc:
         raise ValueError("month 必须使用 YYYY-MM") from exc
     caotan_path, gangwu_path = Path(caotan), Path(gangwu)
-    if not caotan_path.is_file() or not gangwu_path.is_file():
-        raise ValueError("草滩和港务在线测量表必须同时存在")
+    missing_inputs = []
+    if not caotan_path.is_file():
+        missing_inputs.append({
+            "kind": "missing",
+            "role": "online_caotan",
+            "label": "草滩在线测量表",
+            "action": f"请上传草滩在线测量表（没有找到 {caotan_path.name}）",
+        })
+    if not gangwu_path.is_file():
+        missing_inputs.append({
+            "kind": "missing",
+            "role": "online_gangwu",
+            "label": "港务在线测量表",
+            "action": f"请上传港务在线测量表（没有找到 {gangwu_path.name}）",
+        })
+    if missing_inputs:
+        return {
+            "ok": True,
+            "status": "needs_input",
+            "phase": "awaiting_inputs",
+            "target_month": month,
+            "missing_inputs": missing_inputs,
+            "message": "当前上传的文件不完整，需要补充：草滩/港务在线测量表。",
+            "next_action": "请补充在线测量表后重试。",
+        }
 
     target_month = (parsed.year, parsed.month)
     online_rows = read_online_rows(caotan_path, target_month, "草滩")
     online_rows += read_online_rows(gangwu_path, target_month, "港务")
     if not online_rows:
-        raise ValueError(f"在线测量表不包含目标月份 {month} 的有效记录")
+        return {
+            "ok": True,
+            "status": "needs_input",
+            "phase": "awaiting_inputs",
+            "target_month": month,
+            "missing_inputs": [{
+                "kind": "month_mismatch",
+                "role": "online",
+                "label": f"{parsed.month} 月在线测量记录",
+                "action": f"在线测量表不包含目标月份 {month} 的记录，请确认月份或重新上传当月文件",
+            }],
+            "message": f"当前上传的在线测量表不包含 {month} 的记录。",
+            "next_action": "请确认目标月份或上传当月的在线测量表后重试。",
+        }
     summary_rows = merge_online_rows(online_rows)
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)

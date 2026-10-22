@@ -1,6 +1,6 @@
 name: "邮局月度委办运输报表核对 V6.2"
 description: "按表结构识别输入文件，通过受控 Skill 执行月度预检、人工核对和报表交付"
-version: "6.2.0"
+version: "6.2.3"
 type: "general"
 skills:
   - "post-office-monthly-reconciliation"

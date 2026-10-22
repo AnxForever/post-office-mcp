@@ -121,11 +121,23 @@ def _online_orphan_issue(model: Mapping[str, Any]) -> Issue:
 
 def _model_issues(model: Mapping[str, Any]) -> list[Issue]:
     note = model.get("zero_value_note")
+    issues: list[Issue] = []
     if note == "在线记录确认未测量":
-        return [Issue("online_unmeasured", "orange", note, "人工确认是否保持0")]
-    if note == "在线零值与尺寸不一致":
-        return [Issue("online_zero_inconsistent", "red", note, "回查原始测量表")]
-    return []
+        issues.append(Issue("online_unmeasured", "orange", note, "人工确认是否保持0"))
+    elif note == "在线零值与尺寸不一致":
+        issues.append(Issue("online_zero_inconsistent", "red", note, "回查原始测量表"))
+    # 同车牌兜底取到的容间不是本趟实测：V5 用浅蓝标出，V6 也要落成可见标记，
+    # 否则这批复用值在初版里和精确测量值长得一模一样。
+    if model.get("_cross_station"):
+        measured = model.get("measurement_date")
+        measured_text = measured.isoformat() if hasattr(measured, "isoformat") else str(measured or "")
+        issues.append(Issue(
+            "volume_cross_date",
+            "blue",
+            f"容间取自同车牌其他日期的在线测量记录（{measured_text}），非本趟实测",
+            "复核该趟车型是否与所取测量记录一致，不一致时人工改填容间",
+        ))
+    return issues
 
 
 def _is_image_formula(value: Any) -> bool:

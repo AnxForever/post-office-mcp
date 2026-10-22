@@ -155,24 +155,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.phase == "detect":
         # 按表结构识别工作区里每个文件是什么，不依赖文件名。
-        from reconciliation.detect import detect_for_phase
+        from reconciliation.detect import describe_input_gaps, detect_for_phase, needs_input_message
 
         if not args.month:
             print(json.dumps({
                 "ok": False,
+                "status": "failed",
                 "phase": "failed",
                 "errors": ["detect 阶段需要 --month YYYY-MM"],
             }, ensure_ascii=False))
             return 2
         result = detect_for_phase(input_dir, args.month, args.task)
-        ok = not result["missing"] and not result["ambiguous"]
-        payload = {"ok": ok, **result}
-        if result["ambiguous"]:
-            payload["next_action"] = "存在多个同角色文件，请用参数指明使用哪一个"
-        elif result["missing"]:
-            payload["next_action"] = "缺少必需输入：" + "、".join(result["missing"])
+        gaps = describe_input_gaps(result)
+        if gaps:
+            # 输入不全不是执行失败：返回 needs_input，让 Agent 请用户补文件。
+            payload = {
+                **result,
+                "ok": True,
+                "status": "needs_input",
+                "phase": "awaiting_inputs",
+                "task_phase": result["phase"],
+                "missing_inputs": gaps,
+                "message": needs_input_message(gaps),
+                "next_action": "请补充或确认上述文件后重新执行；已识别到的文件会保留。",
+            }
+        else:
+            payload = {
+                **result,
+                "ok": True,
+                "status": "ready",
+                "phase": "detected",
+                "task_phase": result["phase"],
+                "missing_inputs": [],
+                "next_action": "输入齐全，可继续执行该阶段。",
+            }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0 if ok else 3
+        return 0
 
     if args.phase == "runtime":
         child_argv = [
@@ -224,7 +242,11 @@ def main(argv: list[str] | None = None) -> int:
         caotan, gangwu = args.caotan, args.gangwu
         if not caotan or not gangwu:
             # 未指定文件时，按表结构自动识别草滩/港务在线表
-            from reconciliation.detect import detect_for_phase
+            from reconciliation.detect import (
+                describe_input_gaps,
+                detect_for_phase,
+                needs_input_message,
+            )
 
             result = detect_for_phase(input_dir, args.month, "summary")
             resolved = result["resolved"]
@@ -233,16 +255,27 @@ def main(argv: list[str] | None = None) -> int:
             if not gangwu and len(resolved.get("online_gangwu", [])) == 1:
                 gangwu = Path(resolved["online_gangwu"][0])
             if not caotan or not gangwu:
+                gaps = describe_input_gaps(result)
+                if not gaps:
+                    gaps = [{
+                        "kind": "ambiguous",
+                        "role": "online",
+                        "label": "草滩/港务在线测量表",
+                        "action": "请显式传入 --caotan 和 --gangwu，或分别上传两张在线测量表",
+                    }]
                 print(json.dumps({
-                    "ok": False,
-                    "phase": "failed",
-                    "errors": ["无法唯一确定草滩/港务在线测量表"],
+                    "ok": True,
+                    "status": "needs_input",
+                    "phase": "awaiting_inputs",
+                    "task_phase": "summary",
                     "detected": result["files"],
                     "missing": result["missing"],
                     "ambiguous": result["ambiguous"],
-                    "next_action": "请显式传入 --caotan 和 --gangwu",
+                    "missing_inputs": gaps,
+                    "message": needs_input_message(gaps),
+                    "next_action": "请补充或确认草滩/港务在线测量表后重试。",
                 }, ensure_ascii=False, indent=2))
-                return 3
+                return 0
         output_dir = args.output_dir or (workspace / "output")
         child_argv = [
             "build_model_summary.py",
@@ -272,12 +305,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.phase == "final":
         if not args.review_file:
             print(json.dumps({
-                "ok": False,
-                "phase": "failed",
-                "errors": ["--review-file 必须指定（核对后的初版路径）"],
-                "next_action": "请上传人工核对修正后的基础报表初版",
-            }, ensure_ascii=False))
-            return 2
+                "ok": True,
+                "status": "needs_input",
+                "phase": "awaiting_inputs",
+                "task_phase": "final",
+                "missing_inputs": [{
+                    "kind": "missing",
+                    "role": "review_file",
+                    "label": "人工核对后的基础报表初版",
+                    "required": 1,
+                    "found": 0,
+                    "action": "请上传人工核对修正后的基础报表初版",
+                }],
+                "message": "当前上传的文件不完整，需要补充或确认：人工核对后的基础报表初版。",
+                "next_action": "请上传人工核对修正后的基础报表初版后重试。",
+            }, ensure_ascii=False, indent=2))
+            return 0
         child_argv = [
             "run_workflow.py",
             "--phase", "final",
@@ -307,7 +350,11 @@ def main(argv: list[str] | None = None) -> int:
         if not base_file or not finance_file:
             # 未指定文件时，按表结构自动识别：含「一干汇总/二干基础」的是基础报表，
             # 表头含 结算收入 + 普服收入 的是财务收入表（客户可能叫「运输局」）。
-            from reconciliation.detect import detect_for_phase
+            from reconciliation.detect import (
+                describe_input_gaps,
+                detect_for_phase,
+                needs_input_message,
+            )
 
             result = detect_for_phase(input_dir, args.month, "profit")
             resolved = result["resolved"]
@@ -316,16 +363,27 @@ def main(argv: list[str] | None = None) -> int:
             if not finance_file and len(resolved.get("finance", [])) == 1:
                 finance_file = Path(resolved["finance"][0])
             if not base_file or not finance_file:
+                gaps = describe_input_gaps(result)
+                if not gaps:
+                    gaps = [{
+                        "kind": "ambiguous",
+                        "role": "base_report/finance",
+                        "label": "基础报表原版 / 财务收入表",
+                        "action": "请确认或显式指定基础报表原版和财务收入表",
+                    }]
                 print(json.dumps({
-                    "ok": False,
-                    "phase": "failed",
-                    "errors": ["无法唯一确定基础报表原版 / 财务收入表"],
+                    "ok": True,
+                    "status": "needs_input",
+                    "phase": "awaiting_inputs",
+                    "task_phase": "profit",
                     "detected": result["files"],
                     "missing": result["missing"],
                     "ambiguous": result["ambiguous"],
-                    "next_action": "请显式传入 --base-file 和 --finance-file",
+                    "missing_inputs": gaps,
+                    "message": needs_input_message(gaps),
+                    "next_action": "请补充或确认基础报表原版和财务收入表后重试。",
                 }, ensure_ascii=False, indent=2))
-                return 3
+                return 0
         output_dir = args.output_dir or (workspace / "output")
         child_argv = [
             "build_profit_tables.py",

@@ -347,6 +347,36 @@ python scripts/build_profit_tables.py \
 
 ---
 
+### 输入不全时的返回契约（v6.2.2 起）
+
+只上传了个别文件时，脚本**不抛异常、不返回非零退出码**；返回正常 JSON，
+由 Agent 请用户补齐文件：
+
+```json
+{
+  "ok": true,
+  "status": "needs_input",
+  "phase": "awaiting_inputs",
+  "missing_inputs": [
+    {"kind": "missing", "role": "vehicle", "label": "车管基础数据",
+     "required": 6, "found": 0,
+     "action": "请上传车管基础数据（需要 6 个，当前识别到 0 个）"}
+  ],
+  "message": "当前上传的文件不完整，需要补充或确认：车管基础数据。",
+  "next_action": "请补充或确认上述文件后重新执行；已识别到的文件会保留。"
+}
+```
+
+- **退出码 0**；`ok:false` 只用于真正的执行失败（环境、依赖、输出校验）。
+- `kind` 取值：`missing` 缺文件 / `ambiguous` 同角色多份 / `unreadable` 打不开 /
+  `month_mismatch` 月份不符 / `wrong_location` 文件不在当前任务 /
+  `prerequisite` 缺少上一阶段的 run-state。
+- 覆盖阶段：`detect`、`inspect`、`summary`、`review`、`final`、`profit`；
+  直接调用 `build_model_summary.py` / `build_profit_tables.py` 缺文件时同样返回该结构。
+- Agent 应逐条转述 `missing_inputs[].action`，请用户补文件，**不要说成“脚本报错”**。
+
+---
+
 ## 七、入口
 
 ```
@@ -390,6 +420,7 @@ agentos_entrypoint.py --phase <X>
 | 位置 | 问题 | 修复 |
 |---|---|---|
 | `reconciliation/matching.py` | 只按（日期+车牌）精确匹配，同车牌跨站取不到容积 | `match_vehicle_row` 增加 plate 兜底，标记 `_cross_station` |
+| `build_review_workbook.py` | 兜底取到的容间在初版里和实测值长得一样，`_cross_station` 设了却没人读（V5 的蓝标在 V6 丢失） | `_model_issues` 为这类行追加 `volume_cross_date`（浅蓝 `BBD7EE`）问题，行底色与「问题汇总」同时可见；4 月实测 618 条，其中 554 行显示为浅蓝，64 行因价格未匹配被红色覆盖 |
 | `reconciliation/model_summary.py` | 在线表按（日期+车牌）去重，丢掉了同车多趟测量 | 保留全部在线记录，不做去重 |
 | `reconciliation/templates.py` | 列数被 `max_column` 撑开 | `layout_max_column` 截断到 21 列；补蓝标 `BBD7EE` |
 | `inspect_inputs.py` | `integrity.py` 要求 `draft_template` 角色，预检却不产出 | 未上传初版模板时，用内置 `assets/draft-template.xlsx` 补齐该角色 |

@@ -768,8 +768,8 @@ def _write(level, labels, route_order, base, income, out_path, year, month, tonn
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="生成一干/二干盈亏表")
-    parser.add_argument("--base", required=True, type=Path, help="基础报表原版（含一干汇总/二干基础）")
-    parser.add_argument("--finance", required=True, type=Path, help="财务收入表")
+    parser.add_argument("--base", type=Path, default=None, help="基础报表原版（含一干汇总/二干基础）")
+    parser.add_argument("--finance", type=Path, default=None, help="财务收入表")
     parser.add_argument("--month", required=True, help="YYYY-MM")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--tpl-dir", type=Path, default=None,
@@ -781,19 +781,39 @@ def main(argv=None) -> int:
 
     year, month = map(int, args.month.split("-"))
 
-    # 输入校验：路径写错时给出目录清单，而不是只抛 FileNotFoundError
-    for label, path in (("基础报表原版", args.base), ("财务收入表", args.finance)):
-        if not path.is_file():
-            print(f"[STOP] {label} 不存在: {path}")
-            parent = path.parent
-            if parent.is_dir():
-                names = sorted(p.name for p in parent.iterdir() if p.is_file())
-                print(f"  目录 {parent} 现有文件 ({len(names)} 个):")
-                for name in names[:30]:
-                    print(f"    - {name}")
-            else:
-                print(f"  目录也不存在: {parent}")
-            return 2
+    # 输入校验：缺文件属于「请用户补充」，不是执行失败，返回 needs_input 且退出码 0。
+    missing_inputs = []
+    for role, label, path in (
+        ("base_report", "基础报表原版", args.base),
+        ("finance", "财务收入表", args.finance),
+    ):
+        if path is None or not path.is_file():
+            item = {
+                "kind": "missing",
+                "role": role,
+                "label": label,
+                "required": 1,
+                "found": 1 if path is not None and path.is_file() else 0,
+                "action": f"请上传{label}" + (f"（没有找到 {path}）" if path is not None else ""),
+            }
+            if path is not None:
+                parent = path.parent
+                if parent.is_dir():
+                    names = sorted(p.name for p in parent.iterdir() if p.is_file())
+                    item["available_files"] = names[:30]
+            missing_inputs.append(item)
+    if missing_inputs:
+        print(json.dumps({
+            "ok": True,
+            "status": "needs_input",
+            "phase": "awaiting_inputs",
+            "month": args.month,
+            "missing_inputs": missing_inputs,
+            "message": "当前上传的文件不完整，需要补充："
+                       + "、".join(item["label"] for item in missing_inputs) + "。",
+            "next_action": "请补充基础报表原版和/或财务收入表后重试。",
+        }, ensure_ascii=False, indent=2))
+        return 0
 
     # 输出目录：不可写时回退到可写位置，避免 PermissionError
     try:

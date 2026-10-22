@@ -25,6 +25,7 @@ def _terminal(
     ok: bool,
     phase: str,
     *,
+    status: str | None = None,
     target_month: str | None = None,
     outputs=(),
     metrics: dict[str, Any] | None = None,
@@ -33,11 +34,17 @@ def _terminal(
     errors=(),
     audit: dict[str, Any] | None = None,
     published=(),
+    missing_inputs=(),
     next_action: str,
 ) -> dict[str, Any]:
+    if status is None:
+        status = "completed" if ok and phase in {"awaiting_review", "final_completed"} else (
+            "failed" if not ok else "ok"
+        )
     return {
         "ok": ok,
         "terminal": True,
+        "status": status,
         "phase": phase,
         "target_month": target_month,
         "outputs": [str(Path(path)) for path in outputs],
@@ -46,6 +53,7 @@ def _terminal(
         "issues": issues or {},
         "warnings": list(warnings),
         "errors": list(errors),
+        "missing_inputs": list(missing_inputs),
         "audit": audit or {},
         "next_action": next_action,
     }
@@ -131,6 +139,19 @@ def _run_workflow(
     if phase == "review":
         inspection = inspect_inputs(input_dir, output_dir, month, assets_dir=assets)
         if not inspection["ok"]:
+            gaps = inspection.get("missing_inputs", ())
+            if gaps:
+                # 上传不全属于正常等待用户补充，不是执行失败。
+                return _terminal(
+                    True,
+                    "awaiting_inputs",
+                    status="needs_input",
+                    target_month=inspection.get("target_month"),
+                    warnings=inspection.get("warnings", ()),
+                    errors=(),
+                    missing_inputs=gaps,
+                    next_action="请补充或确认上传的文件后重试；已识别到的文件会保留。",
+                )
             return _terminal(
                 False,
                 "failed",
@@ -139,7 +160,25 @@ def _run_workflow(
                 errors=inspection["fatal_errors"],
                 next_action="请按阻断原因补充或修正当月文件",
             )
-        model_summary, review = build_review_workbook(input_dir, output_dir, month, assets_dir=assets)
+        try:
+            model_summary, review = build_review_workbook(input_dir, output_dir, month, assets_dir=assets)
+        except FileNotFoundError as exc:
+            # 预检通过后仍缺文件，通常是上传目录在两次调用间变化或文件被移除。
+            return _terminal(
+                True,
+                "awaiting_inputs",
+                status="needs_input",
+                target_month=inspection.get("target_month"),
+                warnings=inspection.get("warnings", ()),
+                errors=(),
+                missing_inputs=[{
+                    "kind": "missing",
+                    "role": "input",
+                    "label": "当月输入文件",
+                    "action": f"输入文件已不可用，请重新上传后重试：{exc}",
+                }],
+                next_action="请重新上传当月输入文件后重试。",
+            )
         validation = validate_outputs(output_dir, "review")
         state = json.loads((output_dir / "run-state.json").read_text(encoding="utf-8"))
         if not validation["ok"]:
@@ -166,15 +205,38 @@ def _run_workflow(
 
     if review_file is None:
         return _terminal(
-            False,
-            "failed",
-            errors=["final 阶段必须提供 review_file"],
-            next_action="请上传人工复核后的基础报表初版",
+            True,
+            "awaiting_inputs",
+            status="needs_input",
+            missing_inputs=[{
+                "kind": "missing",
+                "role": "review_file",
+                "label": "人工核对后的基础报表初版",
+                "required": 1,
+                "found": 0,
+                "action": "请上传人工核对修正后的基础报表初版",
+            }],
+            next_action="请上传人工核对修正后的基础报表初版后重试。",
         )
     review_path = Path(review_file)
     if not review_path.is_absolute():
         review_path = input_dir / review_path
     review_path = review_path.resolve()
+    if not review_path.is_file():
+        return _terminal(
+            True,
+            "awaiting_inputs",
+            status="needs_input",
+            missing_inputs=[{
+                "kind": "missing",
+                "role": "review_file",
+                "label": "人工核对后的基础报表初版",
+                "required": 1,
+                "found": 0,
+                "action": f"没有找到初版文件：{review_path.name}，请重新上传",
+            }],
+            next_action="请上传人工核对修正后的基础报表初版后重试。",
+        )
     # 上传目录可能是 /inputs，也可能是 workspace；两者都允许。
     allowed = False
     for root in (input_dir, workspace):
@@ -186,12 +248,32 @@ def _run_workflow(
             continue
     if not allowed:
         return _terminal(
-            False,
-            "failed",
-            errors=["review_file 必须位于当前任务的上传目录或 workspace 内"],
-            next_action="请上传当前任务可见的人工修订初版",
+            True,
+            "awaiting_inputs",
+            status="needs_input",
+            missing_inputs=[{
+                "kind": "wrong_location",
+                "role": "review_file",
+                "label": "人工核对后的基础报表初版",
+                "action": "初版文件不在当前任务的上传目录或 workspace 内，请重新上传到当前任务",
+            }],
+            next_action="请重新上传当前任务可见的人工修订初版。",
         )
-    outputs = build_final_reports(review_path, output_dir, assets_dir=assets, previous_first_profit=previous_first_profit, previous_second_profit=previous_second_profit)
+    try:
+        outputs = build_final_reports(review_path, output_dir, assets_dir=assets, previous_first_profit=previous_first_profit, previous_second_profit=previous_second_profit)
+    except FileNotFoundError as exc:
+        return _terminal(
+            True,
+            "awaiting_inputs",
+            status="needs_input",
+            missing_inputs=[{
+                "kind": "prerequisite",
+                "role": "run_state",
+                "label": "同一任务上一阶段的运行状态（run-state.json）",
+                "action": "请先在同一任务内完成 review 阶段，再执行 final；或确认初版和当月输入文件都在当前任务里",
+            }],
+            next_action="请先在同一任务内完成 review 阶段后重试 final。",
+        )
     validation = validate_outputs(output_dir, "final")
     state = json.loads((output_dir / "run-state.json").read_text(encoding="utf-8"))
     audit = _final_audit(state, validation)

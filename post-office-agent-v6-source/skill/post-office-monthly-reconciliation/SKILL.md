@@ -21,12 +21,14 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 1. 使用用户明确给出的 `YYYY-MM` 作为目标月；未给出时先请用户确认。
 2. 将当次动态 Excel 文件全部列入 `code.execute.inputFiles`。
 3. **运行任何业务脚本前，先执行 `--phase detect`**，确认每个文件被识别成什么角色。
-   识别依据是表结构，不是文件名；返回 `ambiguous` 或 `missing` 时停下来问用户，
+   识别依据是表结构，不是文件名；返回 `status:"needs_input"` 时停下来问用户，
    不要自己猜文件名。上传目录随平台版本变化（旧版 `/workspace`，新版 `/inputs`），
    脚本会自动解析并在 `--phase list` 的 `input_dir` 中返回真实位置。
 4. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
 5. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
-6. 如脚本返回 `ok:false`，原样汇报 `errors` 和 `next_action`，不绕过阻断。
+6. `status:"needs_input"`（`ok:true`）表示输入不全，不是执行失败：把
+   `missing_inputs[].action` 逐条告诉用户，请其补充后重试；已识别文件会保留。
+   只有 `ok:false` 才是真正的执行失败，此时原样汇报 `errors` 和 `next_action`。
 7. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
 
 ## 第 0 步：识别文件角色
@@ -61,7 +63,8 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/age
 - `resolved`：每个角色唯一命中的文件路径，可直接作为脚本参数。
 - `files[].evidence`：为什么判成这个角色，向用户解释时引用它。
 - `confidence`：`low` 表示月份对不上或站点无法区分，汇报时要说明。
-- `missing` / `ambiguous`：缺文件或多候选，**停下问用户**，不要自行挑选。
+- `missing_inputs` / `status:"needs_input"`：缺文件或多候选，**停下问用户**，不要自行挑选。
+  这是正常的「等用户补文件」，退出码仍是 0，不要汇报成执行失败。
 
 需要看目录里还有哪些文件时，再执行 `--phase list`：
 
@@ -92,7 +95,8 @@ sys.argv = [
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
-未传 `--caotan` / `--gangwu` 时，脚本按日 Sheet 命名自动识别；识别不唯一会直接报错并列出候选。
+未传 `--caotan` / `--gangwu` 时，脚本按日 Sheet 命名自动识别；识别不唯一会返回
+`status:"needs_input"` 并列出候选，请用户确认或补齐文件。
 只有 `--phase detect --task summary` 已经给出两个明确路径时，才用 `--caotan/--gangwu` 显式传入。
 
 该模式不建立月度运行状态，不能直接进入最终阶段。
@@ -120,6 +124,18 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run
 - 汇报 `metrics`、`issues` 和 `warnings`。
 - 立即停止，请用户人工核对初版中的颜色行与“问题汇总”。
 - 不自动继续生成拆分版或盈亏表。
+
+初版行底色含义（同一行有多种问题时取最深的）：
+
+| 颜色 | 含义 |
+|---|---|
+| 红 | 硬缺失，相关数值算不出来：未匹配车型汇总、价格表未覆盖该路线、容间低于最低吨位档、往返价缺失 |
+| 深橙 | 降吨位后对应吨位价格为空 |
+| 浅蓝 `#BBD7EE` | 容间取自**同车牌其他日期**的在线测量记录，不是本趟实测，需复核车型是否一致 |
+| 橙 | 在线记录确认未测量，容间为 0 |
+| 黄 | 吨位偏离该车本月基线，疑似跨档 |
+
+浅蓝行同样会在「问题汇总」里出现「容间取自同车牌其他日期的在线测量记录」条目，汇报时要说明这批容间是兜底推算的。
 
 ## 阶段二：生成最终报表
 
@@ -185,8 +201,9 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/age
 ```
 
 未传 `--base-file` / `--finance-file` 时，脚本按表结构自动识别：含 `一干汇总`/`二干基础`
-的是基础报表原版，表头含 `结算收入` + `普服收入` 的是财务收入表。识别不唯一会报错并列出
-`detected`、`missing`、`ambiguous`，此时再让用户确认，**不要让模型自己拼文件名**。
+的是基础报表原版，表头含 `结算收入` + `普服收入` 的是财务收入表。识别不唯一时会返回
+`status:"needs_input"` 并列出 `missing_inputs`、`detected`、`missing`、`ambiguous`，
+此时请用户确认或补充文件，**不要让模型自己拼文件名**。
 
 > 财务收入表就是「运输局表」。客户有时把它命名为 `2026.08运输局.xlsx`，
 > 有时叫 `2026.03财务收入表.xlsx`，两者是同一张表（31 列、Sheet 名 `sheet1`），按内容识别即可。

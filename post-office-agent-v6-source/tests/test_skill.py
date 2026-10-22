@@ -105,10 +105,17 @@ def run_phase(*args: str, expect_code: int | None = 0) -> tuple[int, dict]:
     return proc.returncode, payload
 
 
-def phase_detect(workspace: Path, task: str, month: str, expect_ok: bool = True) -> dict:
+def phase_detect(workspace: Path, task: str, month: str, expect_complete: bool = True) -> dict:
+    """detect 始终以退出码 0 返回；输入不全时用 status=needs_input 表示。"""
     _, payload = run_phase(
         "--phase", "detect", "--task", task, "--month", month, "--workspace", str(workspace),
-        expect_code=0 if expect_ok else 3,
+        expect_code=0,
+    )
+    record(
+        f"detect {task}: status 与输入完整性一致",
+        (payload.get("status") == "ready") if expect_complete
+        else (payload.get("status") == "needs_input" and payload.get("ok") is True),
+        f"status={payload.get('status')} ok={payload.get('ok')}",
     )
     return payload
 
@@ -190,11 +197,62 @@ def check_detect_month() -> None:
 
 def check_detect_missing() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        payload = phase_detect(Path(tmp), "profit", "2026-04", expect_ok=False)
+        payload = phase_detect(Path(tmp), "profit", "2026-04", expect_complete=False)
+        gaps = payload.get("missing_inputs", [])
+        roles = {item.get("role") for item in gaps}
         record(
-            "detect missing: 空目录报 missing",
-            payload.get("ok") is False and bool(payload.get("missing")),
-            json.dumps(payload, ensure_ascii=False)[:200],
+            "detect missing: 空目录列出缺少的角色（不报错）",
+            payload.get("missing") == ["base_report", "finance"]
+            and {"base_report", "finance"} <= roles
+            and all(item.get("action") for item in gaps),
+            json.dumps(payload.get("missing_inputs"), ensure_ascii=False)[:300],
+        )
+
+
+def check_partial_upload_flow() -> None:
+    """只上传个别文件时，各阶段都应正常返回 needs_input，而不是报错。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        shutil.copy2(APRIL / "2026.04财务收入表.xlsx", workspace / "2026.04财务收入表.xlsx")
+
+        cases = [
+            ("review", [
+                "--phase", "review", "--workspace", str(workspace),
+                "--month", "2026-04", "--bundle-root", str(SKILL),
+            ]),
+            ("profit", [
+                "--phase", "profit", "--workspace", str(workspace), "--month", "2026-04",
+            ]),
+            ("summary", [
+                "--phase", "summary", "--workspace", str(workspace), "--month", "2026-04",
+            ]),
+            ("final", [
+                "--phase", "final", "--workspace", str(workspace), "--month", "2026-04",
+            ]),
+            ("inspect", [
+                "--phase", "inspect", "--workspace", str(workspace), "--month", "2026-04",
+                "--output-dir", str(workspace / "output"),
+            ]),
+        ]
+        for name, args in cases:
+            _, payload = run_phase(*args, expect_code=0)
+            gaps = payload.get("missing_inputs", [])
+            # inspect 是诊断接口：ok 仍表示“输入是否齐全”，但 status/退出码已经
+            # 表明这是等待用户补文件的正常结果，不是执行失败。
+            ok_field_ok = payload.get("ok") is True or name == "inspect"
+            record(
+                f"{name}: 部分上传返回 needs_input（不报错）",
+                payload.get("status") == "needs_input"
+                and ok_field_ok
+                and bool(gaps)
+                and not payload.get("errors"),
+                json.dumps(payload, ensure_ascii=False)[:300],
+            )
+
+        record(
+            "partial: 未生成交付件",
+            not list(workspace.glob("output/*.xlsx")),
+            str(list(workspace.glob("output/*.xlsx"))),
         )
 
 
@@ -224,7 +282,7 @@ def check_price_ambiguous() -> None:
         wb.save(target)
         wb.close()
 
-        payload = phase_detect(Path(tmp), "review", "2026-03", expect_ok=False)
+        payload = phase_detect(Path(tmp), "review", "2026-03", expect_complete=False)
         roles = [item["role"] for item in payload.get("files", [])]
         record(
             "detect ambiguous: 未标注一干/二干时返回 candidate",
@@ -248,12 +306,17 @@ def check_detect_damaged() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "坏文件.xlsx"
         target.write_bytes(b"not an xlsx at all")
-        payload = phase_detect(Path(tmp), "profit", "2026-04", expect_ok=False)
+        payload = phase_detect(Path(tmp), "profit", "2026-04", expect_complete=False)
         files = payload.get("files", [])
         record(
             "detect damaged: 损坏文件标 damaged/low",
             len(files) == 1 and files[0]["role"] == "damaged" and files[0]["confidence"] == "low",
             str(files)[:200],
+        )
+        record(
+            "detect damaged: 提示重新上传损坏文件",
+            any(item.get("kind") == "unreadable" for item in payload.get("missing_inputs", [])),
+            str(payload.get("missing_inputs"))[:200],
         )
 
 
@@ -264,7 +327,7 @@ def check_detect_ambiguous_role() -> None:
         shutil.copy2(APRIL / "4月基础报表原版.xlsx", target / "基础报表A.xlsx")
         shutil.copy2(APRIL / "4月基础报表原版.xlsx", target / "基础报表B.xlsx")
         shutil.copy2(APRIL / "2026.04财务收入表.xlsx", target / "财务.xlsx")
-        payload = phase_detect(target, "profit", "2026-04", expect_ok=False)
+        payload = phase_detect(target, "profit", "2026-04", expect_complete=False)
         ambiguous = [item["role"] for item in payload.get("ambiguous", [])]
         record(
             "detect ambiguous: 同角色两份文件报 ambiguous",
@@ -425,6 +488,39 @@ def check_pricing() -> None:
         )
 
 
+BLUE_MARK = "FFBDD7EE"
+
+
+def _review_mark_check(path: Path) -> tuple[bool, str]:
+    """跨站兜底取到的容间必须可见：行有浅蓝底色，问题汇总里有对应条目。"""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path)
+    sheet = wb["基础报表"]
+    volume_col = next(c.column for c in sheet[1] if c.value == "容间")
+    blue_rows = empty_volume_blue = 0
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, max_col=21):
+        fills = {
+            str(cell.fill.fgColor.rgb)
+            for cell in row
+            if cell.fill is not None and cell.fill.fill_type == "solid"
+        }
+        if BLUE_MARK not in fills:
+            continue
+        blue_rows += 1
+        if row[volume_col - 1].value in (None, "", 0, 0.0):
+            empty_volume_blue += 1
+    issues = wb["问题汇总"]
+    detail_col = next(c.column for c in issues[1] if c.value == "问题详情")
+    cross_issues = sum(
+        1
+        for r in range(2, issues.max_row + 1)
+        if "容间取自同车牌其他日期" in str(issues.cell(r, detail_col).value or "")
+    )
+    ok = blue_rows > 0 and cross_issues >= blue_rows and empty_volume_blue == 0
+    return ok, f"蓝行={blue_rows} 跨站问题={cross_issues} 蓝行缺容间={empty_volume_blue}"
+
+
 def check_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp) / "workspace"
@@ -445,6 +541,8 @@ def check_full_workflow() -> None:
         record("review: 指标与基线一致", actual == baseline, f"{actual} != {baseline}")
 
         review_file = workspace / "output" / "4月_02_基础报表初版.xlsx"
+        record("review: 跨站兜底容间标蓝", *_review_mark_check(review_file))
+
         _, final = run_phase(
             "--phase", "final", "--workspace", str(workspace),
             "--review-file", str(review_file), "--bundle-root", str(SKILL),
@@ -504,7 +602,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.2.1", manifest.get("version") == "6.2.1", manifest.get("version", ""))
+    record("package: 版本 6.2.3", manifest.get("version") == "6.2.3", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
@@ -549,6 +647,7 @@ def main() -> int:
     check_detect_damaged()
     check_detect_ambiguous_role()
     check_detect_wrong_month()
+    check_partial_upload_flow()
     check_runpy_host_survives()
     check_online_site_by_structure()
     check_list()

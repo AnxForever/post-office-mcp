@@ -343,6 +343,70 @@ def resolve(detected: list[Detected], roles: dict[str, int]) -> dict:
     return {"resolved": resolved, "missing": missing, "ambiguous": ambiguous}
 
 
+def describe_input_gaps(result: dict) -> list[dict]:
+    """把 missing / ambiguous / 损坏文件转成给用户看的补充清单。
+
+    这是「还缺什么」，不是「执行失败」：入口在存在这些条目时返回
+    ``status=needs_input``、退出码 0，Agent 应请用户补齐文件后重试。
+    """
+    gaps: list[dict] = []
+    required = result.get("required_roles", {}) or {}
+    resolved = result.get("resolved", {}) or {}
+    for role in result.get("missing", []) or []:
+        quantity = int(required.get(role, 1) or 1)
+        found = len(resolved.get(role, []) or [])
+        label = ROLE_LABELS.get(role, role)
+        if quantity > 1:
+            action = f"请上传{label}（需要 {quantity} 个，当前识别到 {found} 个）"
+        else:
+            action = f"请上传{label}"
+        gaps.append({
+            "kind": "missing",
+            "role": role,
+            "label": label,
+            "required": quantity,
+            "found": found,
+            "action": action,
+        })
+    for entry in result.get("ambiguous", []) or []:
+        role = entry.get("role", "")
+        label = entry.get("role_label") or ROLE_LABELS.get(role, role)
+        candidates = [item.get("name", "") for item in entry.get("candidates", [])]
+        gaps.append({
+            "kind": "ambiguous",
+            "role": role,
+            "label": label,
+            "required": int(required.get(role, 1) or 1),
+            "found": len(candidates),
+            "candidates": candidates,
+            "reason": entry.get("reason", ""),
+            "action": f"请确认使用哪一个{label}（识别到 {len(candidates)} 个：{'、'.join(candidates)}），"
+                      "删除多余文件后重试",
+        })
+    for item in result.get("files", []) or []:
+        if item.get("role") != "damaged":
+            continue
+        gaps.append({
+            "kind": "unreadable",
+            "role": "damaged",
+            "label": item.get("name") or "工作簿",
+            "action": f"文件无法读取，请重新上传可打开的工作簿：{item.get('name', '')}",
+        })
+    return gaps
+
+
+def needs_input_message(gaps: list[dict]) -> str:
+    """给用户的一句话说明，只说缺什么/要确认什么，不说「执行失败」。"""
+    labels: list[str] = []
+    for gap in gaps:
+        label = gap.get("label") or gap.get("role") or "输入文件"
+        if label not in labels:
+            labels.append(label)
+    if not labels:
+        return "当前输入不完整，请补充后重试。"
+    return "当前上传的文件不完整，需要补充或确认：" + "、".join(labels) + "。"
+
+
 def _vehicle_count() -> int:
     """车管文件数量跟 assets/company-map.json 的公司数一致，不写死 6。"""
     path = Path(__file__).resolve().parents[2] / "assets" / "company-map.json"

@@ -44,7 +44,7 @@ REQUIRED_ROLES = {
     "first_profit_template": 1,
     "second_profit_template": 1,
 }
-PACKAGE_VERSION = "6.2.1"
+PACKAGE_VERSION = "6.2.3"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:
@@ -122,11 +122,21 @@ def inspect_inputs(
             )
     fatal: list[str] = []
     warnings: list[str] = []
+    # 输入不全不是执行失败：这些条目会让上层返回 status=needs_input（退出码 0），
+    # 由 Agent 请用户补充文件，而不是抛异常或报“执行失败”。
+    missing_inputs: list[dict[str, Any]] = []
 
     damaged = [profile.path.name for profile in profiles if profile.role == "damaged"]
     unknown = [profile.path.name for profile in profiles if profile.role in {"unknown", "price_candidate", "profit_candidate"}]
     if damaged:
         fatal.append(f"工作簿损坏或无法读取: {', '.join(damaged)}")
+        for name in damaged:
+            missing_inputs.append({
+                "kind": "unreadable",
+                "role": "damaged",
+                "label": name,
+                "action": f"文件无法读取，请重新上传可打开的工作簿：{name}",
+            })
     if unknown:
         warnings.append(f"未识别且未参与核对的工作簿: {', '.join(unknown)}")
     for item in detected:
@@ -159,12 +169,43 @@ def inspect_inputs(
     for role, count in expected_role_counts.items():
         actual = len(by_role.get(role, []))
         if actual < count:
-            fatal.append(f"缺少{ROLE_LABELS[role]}: 需要{count}个，识别到{actual}个")
+            label = ROLE_LABELS[role]
+            fatal.append(f"缺少{label}: 需要{count}个，识别到{actual}个")
+            missing_inputs.append({
+                "kind": "missing",
+                "role": role,
+                "label": label,
+                "required": count,
+                "found": actual,
+                "action": f"请上传{label}（需要 {count} 个，当前识别到 {actual} 个）",
+            })
         elif actual > count:
-            fatal.append(f"{ROLE_LABELS[role]}角色冲突: 需要{count}个，识别到{actual}个")
+            label = ROLE_LABELS[role]
+            fatal.append(f"{label}角色冲突: 需要{count}个，识别到{actual}个")
+            names = [item.path.name for item in by_role.get(role, [])]
+            missing_inputs.append({
+                "kind": "ambiguous",
+                "role": role,
+                "label": label,
+                "required": count,
+                "found": actual,
+                "candidates": names,
+                "action": f"请确认使用哪一个{label}（识别到 {actual} 个：{'、'.join(names)}），"
+                          "删除多余文件后重试",
+            })
     vehicle_paths = [item.path for item in active_profiles["vehicle"]]
     if vehicle_paths and company_map is not None:
-        fatal.extend(validate_vehicle_sources(vehicle_paths, company_map))
+        vehicle_errors = validate_vehicle_sources(vehicle_paths, company_map)
+        fatal.extend(vehicle_errors)
+        for message in vehicle_errors:
+            # 公司缺文件/重复/未映射都是用户可补充的输入问题，不是执行失败。
+            if "车管" in message:
+                missing_inputs.append({
+                    "kind": "vehicle_mapping",
+                    "role": "vehicle",
+                    "label": "车管基础数据",
+                    "action": f"{message}；请补齐或替换对应的车管文件后重试",
+                })
 
     # 草滩/港务已按日 Sheet 命名（草滩「8月1日」/ 港务「8.1」）识别，
     # 不再依据文件名。无法区分时 refine_profiles 会把置信度标为 low，
@@ -190,8 +231,20 @@ def inspect_inputs(
             warnings.append("输入未提供可确认年份，暂用当前年份；建议显式传入 --month")
         elif observed:
             fatal.append("月份不一致: 输入文件或工作表包含多个业务月份")
+            missing_inputs.append({
+                "kind": "month_mismatch",
+                "role": "month",
+                "label": "目标月份",
+                "action": "输入文件包含多个业务月份，请确认只上传同一个月的文件，或显式指定 --month",
+            })
         else:
             fatal.append("无法从输入推断目标月份，请使用 --month YYYY-MM")
+            missing_inputs.append({
+                "kind": "month_unknown",
+                "role": "month",
+                "label": "目标月份",
+                "action": "无法从输入推断目标月份，请补充当月文件或显式指定 --month YYYY-MM",
+            })
 
     if explicit:
         for profile in online_profiles:
@@ -200,7 +253,14 @@ def inspect_inputs(
                 for year, observed_month in profile.months
             )
             if not has_target_month:
+                label = ROLE_LABELS.get(profile.role, "在线测量表")
                 fatal.append(f"月份不一致: {profile.path.name} 不包含目标月份 {_month_text(explicit)} 的工作表")
+                missing_inputs.append({
+                    "kind": "month_mismatch",
+                    "role": profile.role,
+                    "label": f"{label}（{profile.path.name}）",
+                    "action": f"请上传统计月份为 {_month_text(explicit)} 的{label}",
+                })
 
     month_counts = {
         "vehicle_current": 0,
@@ -215,6 +275,12 @@ def inspect_inputs(
             vehicle_rows = read_vehicle_rows(vehicle_paths, company_map)
         except Exception as exc:
             fatal.append(f"车管基础数据无法读取: {exc}")
+            missing_inputs.append({
+                "kind": "unreadable",
+                "role": "vehicle",
+                "label": "车管基础数据",
+                "action": f"车管基础数据无法读取，请重新上传：{exc}",
+            })
         else:
             invalid_dates = sum(row["execution_date"] is None for row in vehicle_rows)
             rows_by_file: dict[str, list[dict[str, Any]]] = {}
@@ -233,12 +299,24 @@ def inspect_inputs(
                     month_counts["vehicle_other"] += 1
             if invalid_dates >= 3 and invalid_dates * 2 >= len(vehicle_rows):
                 fatal.append("车管基础数据日期大范围无法解析，无法生成可靠月度核对")
+                missing_inputs.append({
+                    "kind": "unreadable",
+                    "role": "vehicle",
+                    "label": "车管基础数据",
+                    "action": "车管基础数据的「邮路执行日期」大范围无法解析，请检查或重新上传",
+                })
             elif invalid_dates:
                 warnings.append(f"车管基础数据有{invalid_dates}条日期无法解析，已从目标月份核对中排除")
             if month_counts["vehicle_other"]:
                 warnings.append(f"车管基础数据有{month_counts['vehicle_other']}条非目标月份记录，已排除")
             if not month_counts["vehicle_current"]:
                 fatal.append(f"车管基础数据不包含目标月份 {_month_text(explicit)} 的有效记录")
+                missing_inputs.append({
+                    "kind": "month_mismatch",
+                    "role": "vehicle",
+                    "label": "车管基础数据",
+                    "action": f"请上传统计月份为 {_month_text(explicit)} 的车管基础数据",
+                })
     if explicit and not fatal:
         try:
             month_counts["online_current"], month_counts["online_other"] = _count_online_rows(
@@ -246,14 +324,22 @@ def inspect_inputs(
             )
         except Exception as exc:
             fatal.append(f"在线测量表无法读取: {exc}")
+            missing_inputs.append({
+                "kind": "unreadable",
+                "role": "online",
+                "label": "在线测量表",
+                "action": f"在线测量表无法读取，请重新上传：{exc}",
+            })
 
     if check_assets:
         fatal.extend(validate_assets(assets_root, PHASE_ONE_ASSETS))
 
     result: dict[str, Any] = {
         "ok": not fatal,
+        "status": "ok" if not fatal else ("needs_input" if missing_inputs else "failed"),
         "target_month": _month_text(explicit) if explicit else None,
         "files_found": len(files),
+        "missing_inputs": missing_inputs,
         "roles": {role: [str(item.path) for item in items] for role, items in by_role.items() if role not in {"unknown", "damaged"}},
         "sources": {role: [_source_entry(item, explicit) for item in items] for role, items in active_profiles.items()},
         "ignored_sources": {"model": [_source_entry(item, explicit) for item in ignored_models]},
@@ -307,7 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = inspect_inputs(args.input_dir, args.workspace_dir, args.month)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["ok"] else 2
+    # 缺文件/月份不符/文件损坏属于「请用户补充」，不是执行失败：退出码 0。
+    return 0 if result["ok"] or result.get("missing_inputs") else 2
 
 
 if __name__ == "__main__":

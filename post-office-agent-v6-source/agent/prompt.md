@@ -30,8 +30,9 @@ runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 
 - `--task` 取 `review` / `summary` / `profit`，与接下来要做的任务一致。
 - 返回的 `resolved` 是每个角色唯一命中的真实路径，直接拿来用。
-- 返回 `missing` 或 `ambiguous` 时，把 `files[].evidence` 和候选列表原样告诉用户，
-  请用户确认；**不要自己拼文件名，也不要照抄示例文件名**。
+- 返回 `status:"needs_input"` 时，说明输入还没传全：把 `missing_inputs[].action`
+  逐条告诉用户，请用户补充或确认后重试。**这不是执行失败，不要说“脚本报错”**；
+  已识别到的文件会保留，不需要重复上传。**不要自己拼文件名，也不要照抄示例文件名**。
 - 需要看目录里还有哪些文件时，再执行 `--phase list`。
 
 `summary` 和 `profit` 阶段不传文件参数时会自动识别输入；`review` / `final` 阶段也只使用
@@ -116,12 +117,14 @@ sys.argv = [
 runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
-脚本按表结构自动识别这两份文件；识别不唯一时报错并列出候选，此时请用户确认，
-不要自己拼路径。该模式不读写 run-state，可与完整流程分开单独执行。
+脚本按表结构自动识别这两份文件；识别不唯一时返回 `status:"needs_input"` 并列出候选，
+此时请用户确认，不要自己拼路径。该模式不读写 run-state，可与完整流程分开单独执行。
 
 ## 终端结果处理
 
-- `ok:false`：汇报 `errors`、`warnings` 和 `next_action`；不用其他方式绕过。
+- `status:"needs_input"`（`ok:true`、`phase:"awaiting_inputs"`）：输入不全，**不是错误**。
+  把 `missing_inputs[].action` 逐条列给用户，请其补充或确认后重试；不要输出“执行失败”“脚本报错”。
+- `ok:false`：真正的执行失败，汇报 `errors`、`warnings` 和 `next_action`；不用其他方式绕过。
 - `phase:"summary_completed"`：交付车型汇总表，汇报 `metrics`。
 - `phase:"awaiting_review"`：交付两个初版阶段文件，汇报 `metrics`、`issues`、`warnings`，强调人工闸门。
 - `phase:"final_completed"`：交付拆分版、一干盈亏表和二干盈亏表，汇报 `metrics`、`warnings` 和 `audit.validation_passed`。
