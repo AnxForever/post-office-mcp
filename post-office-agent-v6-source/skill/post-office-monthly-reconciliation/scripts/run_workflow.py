@@ -106,17 +106,36 @@ def _run_workflow(
             next_action="请使用受支持的工作流阶段",
         )
 
-    if phase == "review" and not month:
-        return _terminal(
-            False,
-            "failed",
-            errors=["review 阶段必须显式提供 month"],
-            next_action="请明确提供目标月份 YYYY-MM",
-        )
-
     workspace = Path(workspace).resolve()
     # 上传附件可能挂载在 /inputs（新版平台）而不是 workspace；输出始终写 workspace/output。
     input_dir = Path(input_dir).resolve() if input_dir is not None else resolve_input_dir(workspace)
+
+    # review 没给月份时从文件内容推断，别让用户记 YYYY-MM。
+    # 推断不确定时不能硬跑：返回 needs_confirm 并把疑问交回给 agent 反问用户。
+    if phase == "review" and not month:
+        from agentos_entrypoint import infer_month_from_inputs
+
+        inference = infer_month_from_inputs(input_dir)
+        if inference["month"] is None:
+            return _terminal(
+                True,
+                "needs_month",
+                status="needs_month",
+                warnings=tuple(inference["questions"]),
+                errors=(),
+                next_action="请把这些疑问转告用户，拿到答复后重跑",
+            )
+        month = inference["month"]
+        if inference["confidence"] != "high":
+            return _terminal(
+                True,
+                "needs_confirm",
+                status="needs_confirm",
+                target_month=month,
+                warnings=tuple(inference["questions"]),
+                errors=(),
+                next_action="月份是按文件推断的，请与用户确认后再执行 review",
+            )
     bundle_root = Path(bundle_root).resolve() if bundle_root is not None else Path(__file__).resolve().parents[1]
     output_dir = workspace / "output"
     assets = bundle_root / "assets"

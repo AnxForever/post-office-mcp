@@ -734,7 +734,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.3.2", manifest.get("version") == "6.3.2", manifest.get("version", ""))
+    record("package: 版本 6.3.3", manifest.get("version") == "6.3.3", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
@@ -779,9 +779,16 @@ def check_merged_bundle_workflow() -> None:
         for path in merged.glob("*.xlsx"):
             shutil.copy2(path, workspace / path.name)
 
+        # 不传 --month：脚本必须从文件名/工作表名自己推断出 2026-09。
+        # 用户不该被要求记 YYYY-MM，更不该被要求写 --phase 这类参数。
         _, review = run_phase(
             "--phase", "review", "--workspace", str(workspace),
-            "--month", "2026-09", "--bundle-root", str(SKILL),
+            "--bundle-root", str(SKILL),
+        )
+        record(
+            "merged: 未传月份也能自动推断目标月",
+            review.get("target_month") == "2026-09",
+            f"target_month={review.get('target_month')} errors={str(review.get('errors'))[:200]}",
         )
         state_path = workspace / "output" / "run-state.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
@@ -830,6 +837,62 @@ def check_merged_bundle_workflow() -> None:
         )
 
 
+def check_month_inference_asks_when_unsure() -> None:
+    """月份推断不确定时必须反问，不能自己挑一个往下跑。
+
+    这是业务硬要求：选错月份等于把整月报表做废，宁可多问一句。
+    """
+    merged = MERGED
+    if not merged.is_dir():
+        print(f"[SKIP] 合并口径测试数据不存在: {merged}")
+        return
+
+    def run_detect(files: list[str], tmp: Path) -> dict:
+        workspace = tmp / "workspace"
+        workspace.mkdir(parents=True)
+        for name in files:
+            src = merged / name
+            if src.is_file():
+                shutil.copy2(src, workspace / name)
+        _, payload = run_phase(
+            "--phase", "detect", "--task", "review",
+            "--workspace", str(workspace), expect_code=0,
+        )
+        return payload
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1) 只有 9 月、没有年份 → 要提示年份不确定
+        payload = run_detect(["9月.xlsx", "汇总.xlsx"], Path(tmp) / "a")
+        inf = payload.get("month_inference") or {}
+        record(
+            "month: 缺年份时标记为不确定并给出疑问",
+            inf.get("confidence") in {"medium", "low"} and bool(inf.get("questions")),
+            f"confidence={inf.get('confidence')} questions={inf.get('questions')}",
+        )
+
+        # 2) 9 月和 10 月打平 → 必须反问，不能返回月份
+        workspace2 = Path(tmp) / "b" / "workspace"
+        workspace2.mkdir(parents=True)
+        shutil.copy2(merged / "9月.xlsx", workspace2 / "9月.xlsx")
+        shutil.copy2(merged / "汇总.xlsx", workspace2 / "汇总.xlsx")
+        shutil.copy2(merged / "9月基础报表原版.xlsx", workspace2 / "10月基础报表原版.xlsx")
+        _, payload2 = run_phase(
+            "--phase", "detect", "--task", "review",
+            "--workspace", str(workspace2), expect_code=0,
+        )
+        inf2 = payload2.get("month_inference") or {}
+        record(
+            "month: 月份冲突时不猜、返回 needs_month",
+            payload2.get("status") == "needs_month" and inf2.get("month") is None,
+            f"status={payload2.get('status')} month={inf2.get('month')}",
+        )
+        record(
+            "month: 冲突时列出候选月份供用户选择",
+            bool(payload2.get("questions")) and bool(inf2.get("conflicts")),
+            f"questions={payload2.get('questions')} conflicts={inf2.get('conflicts')}",
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fast", action="store_true", help="跳过完整 review/final")
@@ -861,6 +924,7 @@ def main() -> int:
     if not args.fast:
         check_full_workflow()
         check_merged_bundle_workflow()
+        check_month_inference_asks_when_unsure()
         check_bundled_templates()
         check_bundled_prices()
 

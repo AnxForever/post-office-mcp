@@ -9,7 +9,20 @@
 3. 不自行计算匹配率、金额、吨位或问题数；只汇报脚本末尾 JSON 中的结果。
 4. 所有用户上传的动态 Excel 文件必须列入 `code.execute.inputFiles`。
 5. Windows 执行时设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1`。
-6. 如果用户未说明目标月，询问并获得 `YYYY-MM`；不根据当前日期猜测业务月份。
+6. **不要问用户"哪个月"，也不要让用户写 `YYYY-MM` 或 `--phase` 这类参数。**
+   用户上传文件后直接执行 `--phase detect` 且**不传 `--month`**，脚本会从文件名和
+   工作表名自动推断目标月（`inferred_month` 字段），并给出 `target_month`。
+   只有脚本返回 `status:"needs_month"` 时，才用大白话问一句"要核对哪个月"。
+   不要根据当前日期猜测业务月份。
+7. **凡是不确定的信息，必须主动反问用户，禁止自己选一个往下跑。**
+   报表一旦选错月份或认错表，整月工作作废，宁可多问一句。具体：
+   - `status:"needs_month"` → 把 `questions` 里的疑问**原样**转告用户，等答复再重跑
+   - `status:"needs_confirm"` 或 `month_inference.confidence` 不是 `high`
+     → 先问"我按 2026 年 9 月处理，对吗？"，得到确认再继续
+   - `conflicts` 里有多个候选月份 → 把候选**都列出来**让用户选，不要挑一个
+   - `missing_inputs` 非空 → 逐条转述 `action`，不要自己拼文件名或跳步
+   - 任何字段缺失、多个文件都像同一角色、文件名与内容对不上 → 反问
+   反问时用业务语言（"这是 2026 年 9 月的报表吗？"），不要暴露 JSON 字段名或命令行参数。
 
 ## 路径约定（必须遵守）
 
@@ -23,13 +36,18 @@
 
 ```python
 import runpy, sys
+# 注意：不传 --month。脚本会从文件名/工作表名推断目标月，
+# 结果在返回 JSON 的 target_month / inferred_month 字段里。
 sys.argv = ["agentos_entrypoint.py", "--phase", "detect", "--task", "review",
-            "--month", "2026-04", "--workspace", "/workspace"]
+            "--workspace", "/workspace"]
 runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
 - `--task` 取 `review` / `summary` / `profit`，与接下来要做的任务一致。
 - 返回的 `resolved` 是每个角色唯一命中的真实路径，直接拿来用。
+- `target_month` 是本次要处理的月份：优先用用户明说的，没有就用脚本推断的
+  `inferred_month`。**不要向用户复述 `--month`、`--phase` 这类命令行参数**，
+  用大白话讲"这是 2026 年 9 月的报表"即可。
 - 返回 `status:"needs_input"` 时，说明输入还没传全：把 `missing_inputs[].action`
   逐条告诉用户，请用户补充或确认后重试。**这不是执行失败，不要说“脚本报错”**；
   已识别到的文件会保留，不需要重复上传。**不要自己拼文件名，也不要照抄示例文件名**。
@@ -50,7 +68,7 @@ sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
     "agentos_entrypoint.py", "--phase", "summary",
     "--workspace", "/workspace",
-    "--month", "2026-04",
+    # 不传 --month，脚本自动推断
 ]
 runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
@@ -70,7 +88,7 @@ sys.argv = [
     "run_workflow.py",
     "--phase", "review",
     "--workspace", "/workspace",
-    "--month", "2026-04",
+    # 不传 --month，脚本自动推断
     "--bundle-root", "{skill_dir}",
 ]
 runpy.run_path("{skill_dir}/scripts/run_workflow.py", run_name="__main__")
@@ -112,7 +130,7 @@ sys.path.insert(0, "{skill_dir}/scripts")
 sys.argv = [
     "agentos_entrypoint.py", "--phase", "profit",
     "--workspace", "/workspace",
-    "--month", "2026-08",
+    # 不传 --month，脚本自动推断
 ]
 runpy.run_path("{skill_dir}/scripts/agentos_entrypoint.py", run_name="__main__")
 ```

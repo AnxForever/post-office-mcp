@@ -39,11 +39,20 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 import runpy, sys
 sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
 sys.argv = ["agentos_entrypoint.py", "--phase", "detect", "--task", "review",
-            "--month", "2026-04", "--workspace", "/workspace"]
+                        "--workspace", "/workspace"]  # 不传 --month，脚本自动推断
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
 
 `--task` 取 `review`（完整月报）、`summary`（只要车型汇总表）或 `profit`（只要盈亏表）。
+
+**不用传 `--month`**：脚本会从文件名和工作表名推断目标月，结果在
+`target_month`（最终采用）和 `inferred_month`（推断来源）里。
+
+- 文件名里的 `9月`、`2026.09`，工作表名里的 `9月1日`、`9.1` 都能识别。
+- 财务收入表的月份通常滞后（业务上允许传上月的），所以它在推断里权重更低，
+  不会被当成目标月。
+- 推断不出、或两个月份打平时返回 `status:"needs_month"`，此时才需要问用户。
+  **不要为了省事自己猜一个月份。**
 
 脚本按**表结构**判断每个文件是什么，不看文件名：
 
@@ -128,7 +137,7 @@ sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts
 sys.argv = [
     "agentos_entrypoint.py", "--phase", "summary",
     "--workspace", "/workspace",
-    "--month", "2026-04",
+    # 不传 --month，脚本自动推断
 ]
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
 ```
@@ -150,7 +159,7 @@ sys.argv = [
     "run_workflow.py",
     "--phase", "review",
     "--workspace", "/workspace",
-    "--month", "2026-04",
+    # 不传 --month，脚本自动推断
     "--bundle-root", "/workspace/skills/post-office-monthly-reconciliation",
 ]
 runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/run_workflow.py", run_name="__main__")
