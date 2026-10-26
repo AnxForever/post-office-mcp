@@ -27,10 +27,16 @@ REQUIRED_ASSETS = (
 
 PHASE_ONE_ASSETS = REQUIRED_ASSETS
 
+# 所有可能的动态输入角色，仅表示「允许出现这些角色」。
+# 每类要几个由 run-state 的 expected_role_counts 决定：合并导出口径下
+# 根本没有 online_caotan / online_gangwu / vehicle，若拿这里的数字当默认值，
+# 校验会凭空要求 online_caotan=1、online_gangwu=1、vehicle=6 而必然失败。
 DYNAMIC_ROLE_COUNTS = {
     "online_caotan": 1,
     "online_gangwu": 1,
+    "online_measure": 1,
     "vehicle": 6,
+    "vehicle_platform": 1,
     "finance": 1,
     "draft_template": 1,
     "first_price": 1,
@@ -129,9 +135,14 @@ def validate_dynamic_state(state: Mapping[str, Any], phase: str) -> list[str]:
     expected_role_counts = state.get("expected_role_counts")
     if not isinstance(expected_role_counts, Mapping):
         expected_role_counts = DYNAMIC_ROLE_COUNTS
-    for role, default_count in DYNAMIC_ROLE_COUNTS.items():
-        raw_expected = expected_role_counts.get(role, default_count)
-        expected_count = raw_expected if isinstance(raw_expected, int) and raw_expected > 0 else default_count
+    for role in DYNAMIC_ROLE_COUNTS:
+        # 以 run-state 记录的口径为准：没列进 expected_role_counts 的角色
+        # 这一口径本来就不该出现，期望数是 0（老状态文件没有这个字段时退回默认值）。
+        raw_expected = expected_role_counts.get(role)
+        if isinstance(raw_expected, int):
+            expected_count = raw_expected
+        else:
+            expected_count = 0 if "expected_role_counts" in state else DYNAMIC_ROLE_COUNTS[role]
         entries = by_role.get(role, []) if isinstance(by_role, Mapping) else []
         if isinstance(entries, (str, bytes, bytearray)) or not isinstance(entries, SequenceABC):
             errors.append(f"运行状态动态输入角色{role}不是文件序列")

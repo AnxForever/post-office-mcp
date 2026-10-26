@@ -30,6 +30,8 @@ ENTRY = SKILL / "scripts" / "agentos_entrypoint.py"
 APRIL = ROOT / "4月数据包"
 MARCH = ROOT / "数据" / "委办报表开发" / "3月"
 MULTI_MONTH = ROOT / "数据"
+# 合并导出口径（1 张容积测量表 + 1 张车管平台汇总 + 官方基础报表 + 财务表）的样本。
+MERGED = ROOT / "9月数据包"
 
 ENV = dict(
     os.environ,
@@ -55,7 +57,10 @@ NATIVE_CRASH = {
     3221225477,  # 0xC0000005 STATUS_ACCESS_VIOLATION
     3221225725,  # 0xC00000FD STATUS_STACK_OVERFLOW
     3221225786,  # 0xC000013A CTRL_C
+    3221226505,  # 0xC0000409 STATUS_STACK_BUFFER_OVERRUN（.pyd 收尾阶段偶发）
     -1073741819,  # 上面的有符号写法
+    -1073741571,  # 0xC00000FD 有符号写法
+    -1073740791,  # 0xC0000409 有符号写法
 }
 
 
@@ -729,7 +734,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.3.0", manifest.get("version") == "6.3.0", manifest.get("version", ""))
+    record("package: 版本 6.3.1", manifest.get("version") == "6.3.1", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
@@ -754,6 +759,54 @@ def check_package() -> None:
         "package: agentos 随包携带技能",
         "agent/skills/post-office-monthly-reconciliation/manifest.json" in agent_names,
     )
+
+
+def check_merged_bundle_workflow() -> None:
+    """合并导出口径必须走通 run_workflow，而不是只跑 build_review_workbook。
+
+    早先 DYNAMIC_ROLE_COUNTS 写死了拆分口径的 online_caotan=1 / online_gangwu=1 /
+    vehicle=6，合并口径上传后 detect 判定正常，review 却在校验阶段整片报
+    「应为1个，实际0个」并以退出码 2 结束。这条测试盯的就是那个缺口。
+    """
+    merged = MERGED
+    if not merged.is_dir():
+        print(f"[SKIP] 合并口径测试数据不存在: {merged}")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp) / "workspace"
+        # resolve_input_dir 优先用 workspace，附件直接放这里即可。
+        workspace.mkdir()
+        for path in merged.glob("*.xlsx"):
+            shutil.copy2(path, workspace / path.name)
+
+        _, review = run_phase(
+            "--phase", "review", "--workspace", str(workspace),
+            "--month", "2026-09", "--bundle-root", str(SKILL),
+        )
+        state_path = workspace / "output" / "run-state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+        record(
+            "merged: detect 判为合并导出口径",
+            state.get("source_bundle") == "merged",
+            f"source_bundle={state.get('source_bundle')}",
+        )
+        record(
+            "merged: review 走到 awaiting_review",
+            review.get("phase") == "awaiting_review",
+            f"{review.get('phase')} errors={str(review.get('errors'))[:300]}",
+        )
+        metrics = review.get("metrics", {})
+        # 合并口径的容间来自平台列；这两个数掉下来通常表示又退回按实测值取数了。
+        record(
+            "merged: 运价已匹配到绝大多数行",
+            metrics.get("price_matched", 0) >= 3600,
+            f"price_matched={metrics.get('price_matched')}",
+        )
+        record(
+            "merged: 与官方基础报表逐单对价已生效",
+            metrics.get("official_comparison", {}).get("available", 0) >= 3200,
+            str(metrics.get("official_comparison")),
+        )
 
 
 def main() -> int:
@@ -786,6 +839,7 @@ def main() -> int:
     check_package()
     if not args.fast:
         check_full_workflow()
+        check_merged_bundle_workflow()
         check_bundled_templates()
         check_bundled_prices()
 

@@ -19,7 +19,13 @@ from reconciliation.excel_io import (
     read_vehicle_platform_rows,
     read_vehicle_rows,
 )
-from reconciliation.integrity import PHASE_ONE_ASSETS, asset_hashes, validate_assets, validate_vehicle_sources
+from reconciliation.integrity import (
+    DYNAMIC_ROLE_COUNTS,
+    PHASE_ONE_ASSETS,
+    asset_hashes,
+    validate_assets,
+    validate_vehicle_sources,
+)
 from reconciliation.normalize import parse_month_token
 
 
@@ -90,7 +96,7 @@ BUNDLED_PAIRS = {
         "profit_candidate",
     ),
 }
-PACKAGE_VERSION = "6.3.0"
+PACKAGE_VERSION = "6.3.1"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:
@@ -263,7 +269,9 @@ def inspect_inputs(
     active_profiles = {role: by_role.get(role, []) for role in roles_required}
     ignored_models = by_role.get("model", [])
     company_map: dict[str, Any] | None = None
-    expected_role_counts = dict(roles_required)
+    # 全部动态角色都写进期望表（不需要的记 0），校验时只按这张表核对，
+    # 不去猜「这个口径是不是还该有草滩/港务/6 家车管文件」。
+    expected_role_counts = {role: roles_required.get(role, 0) for role in DYNAMIC_ROLE_COUNTS}
     try:
         company_map = load_company_map(assets_root / "company-map.json")
         # 只有逐公司口径才需要按公司数校验文件个数；
