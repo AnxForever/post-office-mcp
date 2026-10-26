@@ -734,7 +734,7 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.3.1", manifest.get("version") == "6.3.1", manifest.get("version", ""))
+    record("package: 版本 6.3.2", manifest.get("version") == "6.3.2", manifest.get("version", ""))
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))
@@ -806,6 +806,27 @@ def check_merged_bundle_workflow() -> None:
             "merged: 与官方基础报表逐单对价已生效",
             metrics.get("official_comparison", {}).get("available", 0) >= 3200,
             str(metrics.get("official_comparison")),
+        )
+
+        # final 阶段靠 row_ids 与 row_count 对齐来校验；row_ids 早先只覆盖车管行，
+        # 漏掉「在线有测量但车管无派车」的孤儿行，第二阶段直接报
+        # 「row_count 与 row_ids 数量不一致」而失败。
+        record(
+            "merged: row_ids 覆盖全部行（含在线独有行）",
+            len(state.get("row_ids", [])) == state.get("row_count"),
+            f"row_ids={len(state.get('row_ids', []))} row_count={state.get('row_count')}",
+        )
+
+        review_file = workspace / "output" / "9月_02_基础报表初版.xlsx"
+        _, final = run_phase(
+            "--phase", "final", "--workspace", str(workspace),
+            "--review-file", str(review_file), "--bundle-root", str(SKILL),
+        )
+        outputs = [Path(item).name for item in final.get("outputs", [])]
+        record(
+            "merged: final 产出拆分版 + 两张盈亏表",
+            final.get("phase") == "final_completed" and len(outputs) == 3,
+            f"{final.get('phase')} {outputs} {str(final.get('errors'))[:200]}",
         )
 
 

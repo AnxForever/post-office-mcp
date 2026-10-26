@@ -619,21 +619,25 @@ def build_review_workbook(
             "draft": draft_layout,
         },
         "row_count": count,
+        # 必须从 review_rows 生成，不能用 zip(review_rows, vehicle_rows)：
+        # 上面「反向补充」已经往 review_rows 追加了在线独有行（无派车记录），
+        # zip 会被 vehicle_rows 截断，导致第二阶段校验报
+        # 「row_count 与 row_ids 数量不一致」而直接失败。
         "row_ids": [
             {
                 "source_id": row["source_id"],
                 "source_file_sha256": row["source_id"].split(":", 2)[1],
-                "source_sheet": vehicle["source_sheet"],
-                "source_row": vehicle["source_row"],
-                "company": row["company"],
-                "dispatch_no": row["dispatch_no"],
-                "execution_date": row["seal_time"],
-                "route": row["route"],
-                "plate": row["plate"],
-                "trailer": row["trailer"],
-                "settlement_tonnage": vehicle.get("settlement_tonnage"),
+                "source_sheet": row.get("source_sheet", ""),
+                "source_row": row.get("source_row", ""),
+                "company": row.get("company"),
+                "dispatch_no": row.get("dispatch_no"),
+                "execution_date": row.get("seal_time"),
+                "route": row.get("route"),
+                "plate": row.get("plate"),
+                "trailer": row.get("trailer"),
+                "settlement_tonnage": row.get("settlement_tonnage"),
             }
-            for row, vehicle in zip(review_rows, vehicle_rows)
+            for row in review_rows
         ],
         "metrics": {
             "model_rows": len(model_summary_rows),
