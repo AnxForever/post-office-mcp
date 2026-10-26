@@ -15,8 +15,10 @@ from reconciliation.calculations import apply_cross_tonnage_flags
 from reconciliation.excel_io import (
     file_sha256,
     load_company_map,
+    read_measure_rows,
     read_online_rows,
     read_price_catalog,
+    read_vehicle_platform_rows,
     read_vehicle_rows,
 )
 from reconciliation.matching import (
@@ -185,6 +187,56 @@ def _format_review_remark(
     return " | ".join(parts) if parts else None
 
 
+# 平台容间与实测容积差到这个程度，就认为平台那条不可信（如平台 64 而实测 71）。
+MERGED_VOLUME_TOLERANCE = 5
+
+
+def _merged_volume(
+    vehicle: Mapping[str, Any],
+    model: Mapping[str, Any] | None,
+    measured: Any,
+    issues: list[Issue],
+) -> tuple[Any, list[Issue]]:
+    """合并口径的容间取数：平台容间优先，异常才用实测值。
+
+    官方报表逐单核对结果是平台容间一致 3210/3256，实测容积只对得上一半，
+    所以这里不再以实测值为准。平台值为空、或与实测相差超过容差时回退实测，
+    并把回退原因写进问题列表，方便人工复核。
+    """
+    platform = vehicle.get("platform_capacity")
+    try:
+        platform_value = float(platform) if platform not in (None, "") else None
+    except (TypeError, ValueError):
+        platform_value = None
+    measured_value = None
+    if isinstance(measured, (int, float)) and measured > 0:
+        measured_value = float(measured)
+    if platform_value is not None and platform_value > 0:
+        if measured_value is None:
+            return platform_value, issues
+        if abs(platform_value - measured_value) <= MERGED_VOLUME_TOLERANCE:
+            return platform_value, issues
+        updated = list(issues)
+        updated.append(Issue(
+            "volume_platform_vs_measured",
+            "orange",
+            f"平台容间{platform_value:g}与实测{measured_value:g}相差超过"
+            f"{MERGED_VOLUME_TOLERANCE}方，按平台值计，请核对是否测量有误",
+            "人工确认容间",
+        ))
+        return platform_value, updated
+    if measured_value is not None:
+        updated = list(issues)
+        updated.append(Issue(
+            "volume_from_measured",
+            "orange",
+            "平台未提供容间，已改用测量表容积",
+            "人工确认容间",
+        ))
+        return measured_value, updated
+    return None, issues
+
+
 def _is_current_month_vehicle_row(row: Mapping[str, Any], year: int, month: int) -> bool:
     execution_date = row.get("execution_date")
     return bool(
@@ -226,9 +278,12 @@ def build_review_workbook(
         raise ValueError(f"运行状态不允许生成初版: {state.get('phase')}")
 
     target_year, target_month = map(int, state["target_month"].split("-"))
+    source_bundle = state.get("source_bundle", "split")
     caotan_paths = _source_paths(state, "online_caotan")
     gangwu_paths = _source_paths(state, "online_gangwu")
+    measure_paths = _source_paths(state, "online_measure")
     vehicle_paths = _source_paths(state, "vehicle")
+    platform_paths = _source_paths(state, "vehicle_platform")
     first_price_paths = _source_paths(state, "first_price")
     second_price_paths = _source_paths(state, "second_price")
     draft_template_paths = _source_paths(state, "draft_template")
@@ -238,29 +293,45 @@ def build_review_workbook(
         if bundled.is_file():
             draft_template_paths = [bundled]
     expected_vehicle_count = int(state.get("expected_role_counts", {}).get("vehicle", 6))
+    if source_bundle == "merged":
+        source_ok = len(measure_paths) == 1 and len(platform_paths) == 1
+    else:
+        source_ok = (
+            len(caotan_paths) == 1
+            and len(gangwu_paths) == 1
+            and len(vehicle_paths) == expected_vehicle_count
+        )
     if (
-        len(caotan_paths) != 1
-        or len(gangwu_paths) != 1
-        or len(vehicle_paths) != expected_vehicle_count
+        not source_ok
         or len(first_price_paths) != 1
         or len(second_price_paths) != 1
         or len(draft_template_paths) != 1
     ):
         raise ValueError("运行状态中的输入角色数量无效，请重新预检")
 
-    online_rows = read_online_rows(caotan_paths[0], (target_year, target_month), "草滩")
-    online_rows += read_online_rows(gangwu_paths[0], (target_year, target_month), "港务")
+    if source_bundle == "merged":
+        online_rows = read_measure_rows(measure_paths[0], (target_year, target_month))
+        vehicle_rows = [
+            row
+            for row in read_vehicle_platform_rows(platform_paths[0])
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle_platform"
+    else:
+        online_rows = read_online_rows(caotan_paths[0], (target_year, target_month), "草滩")
+        online_rows += read_online_rows(gangwu_paths[0], (target_year, target_month), "港务")
+        company_map = load_company_map(assets / "company-map.json")
+        vehicle_rows = [
+            row
+            for row in read_vehicle_rows(vehicle_paths, company_map)
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle"
     model_summary_rows = merge_online_rows(online_rows)
     model_index = index_model_summary(model_summary_rows)
-    company_map = load_company_map(assets / "company-map.json")
-    vehicle_rows = [
-        row
-        for row in read_vehicle_rows(vehicle_paths, company_map)
-        if _is_current_month_vehicle_row(row, target_year, target_month)
-    ]
     source_hashes = {
         str(Path(item["path"]).resolve()): item["sha256"]
-        for item in _source_entries(state, "vehicle")
+        for item in _source_entries(state, vehicle_source_role)
         if item.get("path") and item.get("sha256")
     }
     catalogs = {
@@ -283,6 +354,11 @@ def build_review_workbook(
                 matched_model_keys.add((measurement_date, plate))
         issues = _model_issues(model) if model is not None else [_unmatched_issue(vehicle)]
         volume = model.get("measured_volume") if model is not None else None
+        if source_bundle == "merged":
+            # 官方报表的「容间」取车管平台那一列，不是测量表的实测容积：
+            # 与 58 张路线表逐单对账，平台容间一致 3210/3256，实测值只有一半对得上。
+            # 平台缺失或明显异常（平台 64 而实测 71 这种）时，才回退到测量值。
+            volume, issues = _merged_volume(vehicle, model, volume, issues)
         # 车管「往返属性=往返、邮路往返属性=去程」的行按往返价结算，
         # 同单号的返程行不单独计价。
         round_trip = (
@@ -294,7 +370,11 @@ def build_review_workbook(
         # and route type in the issue row while leaving tonnage/freight blank.
         price = match_price(
             vehicle.get("route"),
-            volume if model is not None else 0,
+            # 合并口径下容间来自平台那一列，与「有没有匹配到车型记录」无关：
+            # 车型记录经常存在但测量容积为空，此时 volume 仍是有效值，
+            # 早先这里写成 `volume if model is not None else 0` 会把它换成 0，
+            # 于是一律落到「容间低于最低档」（9 月有 306 行）。
+            volume if volume not in (None, "") else 0,
             catalogs,
             aliases,
             round_trip=round_trip,

@@ -35,14 +35,19 @@ DAILY_CAOTAN = re.compile(r"^\d+月\d+日?$")
 DAILY_GANGWU = re.compile(r"^\d+\.\d+$")
 
 # 这些角色按月区分版本；价格表/盈亏模板/初版模板跟随文档，不按月份淘汰。
-MONTH_SCOPED = {"base_report", "finance", "online_caotan", "online_gangwu", "vehicle"}
+MONTH_SCOPED = {
+    "base_report", "finance", "online_caotan", "online_gangwu", "online_measure",
+    "vehicle", "vehicle_platform",
+}
 
 ROLE_LABELS = {
     "base_report": "基础报表原版",
     "finance": "财务收入表",
     "online_caotan": "草滩在线测量表",
     "online_gangwu": "港务在线测量表",
+    "online_measure": "车辆容积测量表",
     "vehicle": "车管基础数据",
+    "vehicle_platform": "车管平台汇总导出",
     "first_price": "一干价格表",
     "second_price": "二干价格表",
     "price_candidate": "价格表（一干/二干待定）",
@@ -267,6 +272,12 @@ def _detect_from_profile(profile: FileProfile, month: tuple[int, int] | None = N
     elif role == "vehicle":
         confidence = "high"
         evidence.append("表头含 邮路名称 + 邮路执行日期 + 派车单号 + 邮运量")
+    elif role == "vehicle_platform":
+        confidence = "high"
+        evidence.append("表头含 邮路名称 + 邮路执行日期 + 派车单号 + 车牌号（车管平台汇总导出）")
+    elif role == "online_measure":
+        confidence = "high"
+        evidence.append("含无表头日期列（9.1 格式）+ 邮路名称 + 车牌号 + 测量容积")
     elif role == "finance":
         confidence = "high"
         evidence.append("表头含 邮路名称 + 结算收入 + 普服收入")
@@ -416,22 +427,39 @@ def _vehicle_count() -> int:
         return 6
 
 
-def _phase_roles(phase: str) -> dict[str, int] | None:
+def _uses_merged_bundle(detected: list) -> bool:
+    """输入里有合并导出的容积测量表或车管汇总时，按合并口径要角色。
+
+    两套口径等价、不能混用：合并口径下不再要求草滩/港务和 6 家公司各自的导出。
+    """
+    roles = {item.role for item in detected}
+    return bool(roles & {"online_measure", "vehicle_platform"})
+
+
+def _phase_roles(phase: str, detected: list | None = None) -> dict[str, int] | None:
     if phase == "profit":
         return {"base_report": 1, "finance": 1}
+    merged = _uses_merged_bundle(detected or [])
     if phase == "summary":
+        if merged:
+            return {"online_measure": 1}
         return {"online_caotan": 1, "online_gangwu": 1}
     if phase == "review":
-        return {
-            "online_caotan": 1,
-            "online_gangwu": 1,
-            "vehicle": _vehicle_count(),
+        common = {
             "finance": 1,
             "draft_template": 1,
             "first_price": 1,
             "second_price": 1,
             "first_profit_template": 1,
             "second_profit_template": 1,
+        }
+        if merged:
+            return {"online_measure": 1, "vehicle_platform": 1, **common}
+        return {
+            "online_caotan": 1,
+            "online_gangwu": 1,
+            "vehicle": _vehicle_count(),
+            **common,
         }
     return None
 
@@ -520,10 +548,10 @@ def _with_bundled_inputs(
 
 
 def detect_for_phase(workspace: Path | str, month: str | None, phase: str) -> dict:
-    roles = _phase_roles(phase)
+    uploaded = detect_workspace(workspace, month)
+    roles = _phase_roles(phase, uploaded)
     if roles is None:
         raise ValueError(f"不支持的阶段: {phase}")
-    uploaded = detect_workspace(workspace, month)
     detected, bundled = _with_bundled_inputs(uploaded, roles)
     resolution = resolve(detected, roles)
     bundled_prices = [

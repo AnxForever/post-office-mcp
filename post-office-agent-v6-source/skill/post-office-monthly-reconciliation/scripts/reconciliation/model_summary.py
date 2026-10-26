@@ -13,7 +13,9 @@ from openpyxl.styles import Font, PatternFill
 from .normalize import normalize_plate
 
 
-SITE_ORDER = {"草滩": 0, "港务": 1}
+# 「合并」是草滩+港务一次导出的容积测量表；没有更高优先级，
+# 但它自己独占一个来源，不会和逐场地记录同时出现。
+SITE_ORDER = {"草滩": 0, "港务": 1, "合并": 2}
 HEADERS = [
     "序号", "测量日期", "场地", "邮路", "车牌号", "挂车号", "长", "宽", "高",
     "测量容积", "车型问题", "备注", "候选记录数", "来源文件", "来源Sheet", "来源行",

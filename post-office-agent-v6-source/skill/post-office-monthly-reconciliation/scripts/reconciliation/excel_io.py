@@ -60,7 +60,43 @@ FINANCE_FIELDS = {
     "universal_income": ["普服收入"],
 }
 
+# 车管平台「汇总导出」的最低必需列。平台导出没有 结算吨位/往返属性/邮路往返属性，
+# 所以这几个字段只在存在时读取，缺了不报错——价格一律按价格表重算，
+# 平台自带的「运价/结算金额」不参与计价（口径与官方报表不一致，且有重复计）。
+VEHICLE_PLATFORM_FIELDS = {
+    "route": ["邮路名称"],
+    "date": ["邮路执行日期"],
+    "dispatch_no": ["派车单号"],
+    "plate": ["车牌号"],
+}
+# 车管平台汇总里的可选列：有就用，没有就留空。
+VEHICLE_PLATFORM_OPTIONAL = {
+    "trailer": ["车厢码", "挂车号"],
+    "transport_volume": ["邮运量"],
+    "capacity": ["容间"],
+    "company": ["班次单号", "签订局名称"],
+    "level": ["邮路级别"],
+}
+# 容积测量表（草滩+港务合并导出）的必需列：没有日期表头，日期单独识别。
+MEASURE_FIELDS = {
+    "route": ["邮路名称"],
+    "plate": ["车牌号"],
+    "volume": ["测量容积(方)", "测量容积（方）", "测量容积", "容积"],
+}
+MEASURE_OPTIONAL = {
+    "trailer": ["车厢车牌号", "挂车号", "车厢码"],
+    "length": ["长(m)", "长（m）", "长"],
+    "width": ["宽(m)", "宽（m）", "宽"],
+    "height": ["高(m)", "高（m）", "高"],
+    "problem": ["车型问题"],
+    "remark": ["备注", "未装容积(米)", "未装容积（米）"],
+}
+# 容积测量表的日期列没有表头，值形如「9.1」。
+MEASURE_DATE_PATTERN = re.compile(r"^\d{1,2}\.\d{1,2}$")
+
 PRICE_ROUTE_HEADERS = {"邮路名称", "路向"}
+# 基础报表原版的标志性页签；这两个名字出现在工作簿里就是基础报表，不再往下猜。
+BASE_REPORT_SHEETS = {"一干汇总", "二干基础"}
 PRICE_BLANK_ROUTE_RUN = 10
 PROFIT_GROUP_HEADERS = ["趟次(趟)", "装载量(袋件)", "每车平均装载量(袋件)", "运费（元）", "结算收入（元）", "盈亏值（元）", "平均每车盈亏（元）"]
 
@@ -118,6 +154,17 @@ def discover_workbooks(input_dir: Path | str) -> list[Path]:
 
 def _header_key(value: Any) -> str:
     return re.sub(r"[\s:：]", "", normalize_text(value)).lower()
+
+
+def _row_width(ws, header_row: int, sample_rows: int = 5) -> int:
+    """只读模式下 max_column 会跟着已读内容收缩，表头行末尾的空列会被截掉。
+
+    以表头行和随后几行数据里最长的那条为准，保证日期列这类「无表头」列不被丢掉。
+    """
+    widest = 0
+    for row in ws.iter_rows(min_row=header_row, max_row=header_row + sample_rows, values_only=True):
+        widest = max(widest, len(row))
+    return widest
 
 
 def _matches_header(actual: str, candidate: str) -> bool:
@@ -236,10 +283,39 @@ def _profit_group_header(ws) -> int | None:
 def _review_header(ws) -> tuple[int | None, dict[str, int]]:
     expected = [normalize_text(value) for value in REVIEW_HEADERS]
     for row, values in enumerate(ws.iter_rows(min_row=1, max_row=30, values_only=True), 1):
+        values = tuple(values)
+        if len(values) < len(expected):
+            # 只读模式常把表头行末尾的空单元格截掉，补齐后再比，否则第 18~21 列永远对不上。
+            values = values + (None,) * (len(expected) - len(values))
         actual = [normalize_text(value) for value in values[:len(expected)]]
         if actual == expected:
             return row, {f"column_{column}": column for column in range(1, len(expected) + 1)}
     return None, {}
+
+
+def _platform_header(ws) -> tuple[int | None, dict[str, int]]:
+    """车管平台汇总导出的表头。
+
+    只在开头 5 行里找：平台导出的表头必然在表头行，而初版模板/报表的数据区
+    深处也可能出现同样的列名组合，放宽行数会把它们误判成车管汇总。
+    """
+    try:
+        return find_header_row(ws, VEHICLE_PLATFORM_FIELDS, max_rows=5)
+    except ValueError:
+        return None, {}
+
+
+def _has_unheaded_date_column(ws, header_row: int, probe_rows: int = 20) -> bool:
+    """表头有空列、且该列的值形如「9.1」——合并容积测量表的特征。"""
+    header = list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
+    empty_columns = [i for i, value in enumerate(header) if value in (None, "")]
+    if not empty_columns:
+        return False
+    for row in ws.iter_rows(min_row=header_row + 1, max_row=header_row + probe_rows, values_only=True):
+        for index in empty_columns:
+            if index < len(row) and MEASURE_DATE_PATTERN.match(normalize_text(row[index])):
+                return True
+    return False
 
 
 def classify_workbook(path: Path | str) -> FileProfile:
@@ -253,13 +329,38 @@ def classify_workbook(path: Path | str) -> FileProfile:
     file_month = parse_month_token(path.name)
     if file_month and file_month not in profile.months:
         profile.months.append(file_month)
+    # 基础报表原版的「一干汇总/二干基础」页签也含车管必需列，必须先按 Sheet 名判定，
+    # 否则会被认成车管汇总导出，整份报表只剩两个页签可用。
+    if any(normalize_text(name) in BASE_REPORT_SHEETS for name in wb.sheetnames):
+        profile.role = "base_report"
+        wb.close()
+        return profile
     try:
         for ws in wb.worksheets:
             if hasattr(ws, "reset_dimensions") and ws.calculate_dimension() == "A1:A1":
                 ws.reset_dimensions()
+            # 21 列初版模板必须最先判：它的数据区里也可能出现一段
+            # 「邮路名称/车牌号/日期」表头，晚判就会把模板认成车管汇总导出。
+            row, fields = _review_header(ws)
+            if row:
+                profile.role, profile.header_row, profile.field_map = "draft_template", row, fields
+                return profile
             row, fields = _try_header(ws, VEHICLE_FIELDS)
             if row:
                 profile.role, profile.header_row, profile.field_map = "vehicle", row, fields
+                date_column = fields["date"]
+                for values in ws.iter_rows(min_row=row + 1, values_only=True):
+                    value = values[date_column - 1] if date_column <= len(values) else None
+                    parsed = parse_date(value)
+                    token = (parsed.year, parsed.month) if parsed else None
+                    if token and token not in profile.months:
+                        profile.months.append(token)
+                return profile
+            # 车管平台「汇总导出」：必备列比逐家公司导出少三个
+            # （结算吨位 / 往返属性 / 邮路往返属性），必须单独识别。
+            row, fields = _platform_header(ws)
+            if row:
+                profile.role, profile.header_row, profile.field_map = "vehicle_platform", row, fields
                 date_column = fields["date"]
                 for values in ws.iter_rows(min_row=row + 1, values_only=True):
                     value = values[date_column - 1] if date_column <= len(values) else None
@@ -279,6 +380,12 @@ def classify_workbook(path: Path | str) -> FileProfile:
                 lowered = normalize_text(path.name).lower()
                 daily_caotan = sum(1 for name in wb.sheetnames if DAILY_CAOTAN_SHEET.match(normalize_text(name)))
                 daily_gangwu = sum(1 for name in wb.sheetnames if DAILY_GANGWU_SHEET.match(normalize_text(name)))
+                # 合并后的容积测量表：没有「日」页签，日期放在一列无表头的单元格里。
+                # 先判它，否则会被当成「车型表」忽略掉。
+                if not daily_caotan and not daily_gangwu and _has_unheaded_date_column(ws, row):
+                    profile.role, profile.header_row, profile.field_map = "online_measure", row, fields
+                    profile.site = "合并"
+                    return profile
                 # 先看日 Sheet 命名：草滩「8月1日」，港务「8.1」。
                 # 文件名只在日 Sheet 无法区分时兜底。
                 if daily_gangwu > daily_caotan:
@@ -297,11 +404,6 @@ def classify_workbook(path: Path | str) -> FileProfile:
                     role = "model"
                 profile.role, profile.header_row, profile.field_map = role, row, fields
                 profile.site = "港务" if role == "online_gangwu" else ("草滩" if role == "online_caotan" else None)
-                return profile
-            # 初版模板（21 列）要在价格表之前判断：它同样含 邮路名称/公里/吨位/系数。
-            row, fields = _review_header(ws)
-            if row:
-                profile.role, profile.header_row, profile.field_map = "draft_template", row, fields
                 return profile
             row, fields = _price_header(ws)
             if row:
@@ -971,7 +1073,66 @@ def read_price_catalog(path: Path | str, kind: str) -> dict[str, Any]:
         if cached_wb is not None:
             cached_wb.close()
     catalog["tiers"] = sorted(tier_definitions.values(), key=lambda item: (item["min_volume"], item["key"]))
+    _merge_route_supplement(catalog)
     return catalog
+
+
+SUPPLEMENT_ASSET = "route-supplement.json"
+
+
+def _merge_route_supplement(catalog: dict[str, Any], assets_dir: Path | None = None) -> None:
+    """合并合同外专线的补充价目。
+
+    兰州、平凉、陇南、洛川港、兴平港、泾阳港、庆阳港这几条不在两张合同价目表里，
+    但每月都要结算。价格取自官方基础报表逐单反查（见 assets/route-supplement.json），
+    每个档位在当月内取值唯一，可以直接当固定价用。
+
+    只补「价格表里完全不存在」的路线；价格表里已有的路线一律以合同价为准，
+    避免补充值覆盖合同调价后的新价。
+    """
+    root = assets_dir or Path(__file__).resolve().parents[2] / "assets"
+    path = root / SUPPLEMENT_ASSET
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    routes = data.get("routes") if isinstance(data, dict) else None
+    if not isinstance(routes, dict):
+        return
+    tiers = catalog.get("tiers") or []
+    for route, entry in routes.items():
+        name = normalize_text(route)
+        if not name or name in catalog["routes"] or not isinstance(entry, dict):
+            continue
+        prices = entry.get("prices")
+        if not isinstance(prices, dict) or not prices:
+            continue
+        cleaned = {}
+        for key, value in prices.items():
+            number = _to_number(value)
+            if number is not None:
+                cleaned[tonnage_key(key)] = number
+        if not cleaned:
+            continue
+        # 官方专线按固定容间区间定档，区间下限直接带进目录，供 _supplement_tier 使用。
+        thresholds = {
+            tonnage_key(key): _to_number(value)
+            for key, value in (entry.get("volume_thresholds") or {}).items()
+            if _to_number(value) is not None
+        }
+        catalog["routes"][name] = {
+            "distance": _to_number(entry.get("distance")),
+            "prices": cleaned,
+            "volume_thresholds": thresholds,
+            "sheet": "补充价目",
+            "kind": catalog.get("kind"),
+            "supplement": True,
+        }
+    # 补充价目的档位（3/5/12/20/30/40A）只用于它自己的路线查价，
+    # 绝不能插进主档位表：一干主表是每 5 方一档，插进一个 min_volume=3 的档
+    # 会打乱整个阶梯，让所有路线都选错档。
 
 
 def parse_date(value: Any) -> datetime | None:
@@ -988,3 +1149,191 @@ def parse_date(value: Any) -> datetime | None:
             except ValueError:
                 return None
     return None
+
+
+def read_vehicle_platform_rows(path: Path | str) -> list[dict[str, Any]]:
+    """读取车管平台「汇总导出」（总/一干/二干 页签）。
+
+    平台导出和逐家公司导出是同一种业务表，但少了三个字段：
+    结算吨位、往返属性、邮路往返属性。价格一律按价格表重算，
+    平台自带的「运价/结算金额/系数」不参与计价——它的口径与官方报表不一致，
+    而且同一邮路同一天多趟时结算金额会重复记在每一行上。
+
+    优先取「总」页签（含一干+二干全集）；没有「总」时合并一干、二干，
+    避免同一趟在两个页签里各出现一次。
+    """
+    path = Path(path)
+    wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    result: list[dict[str, Any]] = []
+    try:
+        sheets = _platform_sheet_order(wb.sheetnames)
+        for sheet_name in sheets:
+            ws = wb[sheet_name]
+            if hasattr(ws, "reset_dimensions"):
+                ws.reset_dimensions()
+            header_row, field_map = _try_header(ws, VEHICLE_PLATFORM_FIELDS)
+            if not header_row:
+                continue
+            header_values = list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
+            for key, aliases in VEHICLE_PLATFORM_OPTIONAL.items():
+                column = _find_header_column(header_values, aliases)
+                if column:
+                    field_map[key] = column
+            for source_row, row in enumerate(
+                ws.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1
+            ):
+                plate = normalize_plate(_value(row, field_map, "plate"))
+                if not plate:
+                    continue
+                execution_datetime = parse_date(_value(row, field_map, "date"))
+                if execution_datetime is None:
+                    continue
+                company = normalize_text(_value(row, field_map, "company"))
+                result.append({
+                    "source_file": path.name,
+                    "source_path": str(path.resolve()),
+                    "source_sheet": ws.title,
+                    "source_row": source_row,
+                    "company": company,
+                    "route": _value(row, field_map, "route"),
+                    "date": _value(row, field_map, "date"),
+                    "execution_date": execution_datetime.date(),
+                    "dispatch_no": normalize_dispatch_no(_value(row, field_map, "dispatch_no")),
+                    "plate": plate,
+                    "trailer": normalize_trailer(_value(row, field_map, "trailer")),
+                    "plate_key": plate,
+                    "trailer_key": normalize_trailer(_value(row, field_map, "trailer")),
+                    "transport_volume": _to_number(_value(row, field_map, "transport_volume")),
+                    # 平台不提供结算吨位；留空让计价完全按价格表走。
+                    "settlement_tonnage": None,
+                    "round_trip_attribute": "",
+                    "route_direction": "",
+                    "platform_level": normalize_text(_value(row, field_map, "level")),
+                    "platform_capacity": _to_number(_value(row, field_map, "capacity")),
+                })
+    finally:
+        wb.close()
+    return result
+
+
+def _platform_sheet_order(sheet_names: Sequence[str]) -> list[str]:
+    """「总」优先；没有「总」才用一干/二干，防止同一趟被两个页签重复读入。"""
+    normalized = {normalize_text(name): name for name in sheet_names}
+    if "总" in normalized:
+        return [normalized["总"]]
+    selected = [normalized[name] for name in ("一干", "二干") if name in normalized]
+    return selected or list(sheet_names)
+
+
+def read_measure_rows(
+    path: Path | str,
+    target_month: tuple[int, int],
+) -> list[dict[str, Any]]:
+    """读取合并后的车辆容积测量表（草滩 + 港务一并导出）。
+
+    与逐场地在线表的两点差异：
+      1. 没有「日」页签，日期是**无表头的一列**，值形如 9.1；
+      2. 同一张表里混着两个场地、上百条邮路，所以场地记为「合并」。
+
+    日期列有一个必须处理的陷阱：Excel 把日期存成数字，9.10 与 9.1 的值完全相同，
+    所以 10/20/30 号会退化成 9.1/9.2/9.3，和 1/2/3 号混在一起。这里按
+    「1~3 号同时也是 10/20/30」的歧义口径处理，把两条日期都产出，
+    由下游「日期+车牌」精确匹配后再按容间接近程度择优——直接把 9.1 当成 1 号
+    会让 10 号那天的趟次永远配不上测量值。
+    """
+    path = Path(path)
+    wb = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+    result: list[dict[str, Any]] = []
+    year = target_month[0]
+    try:
+        for source_sheet_order, ws in enumerate(wb.worksheets):
+            if hasattr(ws, "reset_dimensions"):
+                ws.reset_dimensions()
+            header_row, field_map = _try_header(ws, MEASURE_FIELDS)
+            if not header_row:
+                continue
+            # 只读模式下 ws.max_column 会按已读内容收缩，_try_header 读完之后
+            # 表头末尾的 None 列（测量表的日期列）就看不到了。
+            # 用表头行 + 首行数据里较长的那条来展开列数，否则日期列会被截掉。
+            header_values = list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
+            probe = next(ws.iter_rows(min_row=header_row + 1, max_row=header_row + 1, values_only=True), ())
+            if len(probe) > len(header_values):
+                header_values = tuple(header_values) + (None,) * (len(probe) - len(header_values))
+            for key, aliases in MEASURE_OPTIONAL.items():
+                column = _find_header_column(header_values, aliases)
+                if column:
+                    field_map[key] = column
+            date_column = _find_measure_date_column(ws, header_row, header_values, target_month)
+            for source_row, row in enumerate(
+                ws.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1
+            ):
+                record = _record_from_model_row(row, field_map, source_row, ws.title)
+                if not record["plate_key"]:
+                    continue
+                raw_date = row[date_column - 1] if date_column and date_column <= len(row) else None
+                for measurement_date in _measure_dates(raw_date, year, target_month[1]):
+                    item = dict(record)
+                    item["site"] = "合并"
+                    item["measurement_date"] = measurement_date
+                    item["source_file"] = path.name
+                    item["source_path"] = str(path.resolve())
+                    item["source_sheet_order"] = source_sheet_order
+                    item["source_order"] = len(result)
+                    result.append(item)
+    finally:
+        wb.close()
+    return result
+
+
+def _find_measure_date_column(ws, header_row: int, header_values: Sequence[Any], target_month: tuple[int, int]) -> int | None:
+    """容积测量表的日期列没有表头，靠「值形如 9.1」来定位。"""
+    month = target_month[1]
+    best: tuple[int, int] | None = None
+    for column, value in enumerate(header_values, 1):
+        if value not in (None, ""):
+            continue
+        hits = 0
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=header_row + 40, values_only=True):
+            cell = row[column - 1] if column <= len(row) else None
+            if _measure_dates(cell, target_month[0], month):
+                hits += 1
+        if hits and (best is None or hits > best[1]):
+            best = (column, hits)
+    return best[0] if best else None
+
+
+def _measure_dates(value: Any, year: int, month: int) -> list[date]:
+    """把「9.1」这类无表头日期换算成日期；1/2/3 号同时产出 10/20/30 号的候选。
+
+    必须走 Decimal 的字符串形式取小数位，不能用 fraction * 100：
+    0.1 * 100 == 10.000000000000002，四舍五入会把 9.1 算成 10 号，
+    于是 1 号的测量记录整体丢掉、10 号的反而翻倍。
+    """
+    if value is None or value == "":
+        return []
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return []
+    if not number.is_finite():
+        return []
+    whole = int(number)
+    text = format(number, "f")
+    _, _, fraction = text.partition(".")
+    fraction = fraction.rstrip("0")
+    if not fraction:
+        return []
+    day = int(fraction)
+    if whole != month or not 1 <= day <= 31:
+        return []
+    days = {day}
+    if day in (1, 2, 3):
+        # 9.10 / 9.20 / 9.30 在浮点里等于 9.1 / 9.2 / 9.3，无法区分，两个都保留。
+        days.add(day * 10)
+    result: list[date] = []
+    for candidate in sorted(days):
+        try:
+            result.append(date(year, month, candidate))
+        except ValueError:
+            continue
+    return result

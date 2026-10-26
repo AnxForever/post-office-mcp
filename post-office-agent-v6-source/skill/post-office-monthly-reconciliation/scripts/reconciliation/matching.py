@@ -237,9 +237,85 @@ def _tier_coefficient(catalog: Mapping[str, Any], key: str) -> Decimal:
     return Decimal("1")
 
 
+def _highest_priced_tier(
+    route_info: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+) -> tuple[str, Any, Any] | None:
+    """该路线价目表里最高的一档有价档位，用于容积超出表范围时封顶计价。"""
+    prices = route_info.get("prices") or {}
+    if not prices:
+        return None
+    tier_by_key = {
+        tonnage_key(tier.get("key")): tier for tier in catalog.get("tiers", [])
+    }
+    best: tuple[Decimal, str] | None = None
+    for raw_key, value in prices.items():
+        if value in (None, ""):
+            continue
+        number = _tonnage_number(raw_key)
+        if number is None:
+            continue
+        if best is None or number > best[0]:
+            best = (number, raw_key)
+    if best is None:
+        return None
+    key = tonnage_key(best[1])
+    tier = tier_by_key.get(key, {})
+    return key, tier.get("coefficient"), prices[best[1]]
+
+
+def _supplement_tier(
+    route_info: Mapping[str, Any],
+    volume_number: Decimal | None,
+    catalog: Mapping[str, Any],
+) -> tuple[str, Any, Any]:
+    """补充价目按吨位档查价，返回 (档位键, 系数, 价格)。
+
+    官方这些专线是「按结算吨位定档」的固定价：西安-兰州 12 吨 3213、20 吨 4233、
+    30 吨 5100、40A 5712。容间 63 方对应 12 吨那档，不是 40A。
+    先把容间按主价格表换成吨位档（63 方 → 13 档），
+    再在补充价目里找不超过它的最大吨位档（13 → 12 吨）。
+    """
+    prices = route_info.get("prices") or {}
+    if not prices or volume_number is None:
+        return "", None, None
+    thresholds = route_info.get("volume_thresholds") or {}
+    candidates: list[tuple[Decimal, str]] = []
+    for raw_key in prices:
+        number = _tonnage_number(raw_key)
+        if number is not None:
+            candidates.append((number, raw_key))
+    if not candidates:
+        first = next(iter(prices))
+        return tonnage_key(first), None, prices[first]
+    if thresholds:
+        # 官方专线按固定容间区间定档（兰州：63~90→12吨，127→20吨，
+        # 130~143→30吨，153+→40A），不是「容间÷5」。区间表来自官方逐单反查。
+        chosen_key = None
+        for raw_key in sorted(thresholds, key=lambda k: thresholds[k]):
+            try:
+                if volume_number >= Decimal(str(thresholds[raw_key])):
+                    chosen_key = raw_key
+            except Exception:
+                continue
+        if chosen_key is not None and chosen_key in prices:
+            return tonnage_key(chosen_key), None, prices[chosen_key]
+    else:
+        # 没有区间表时退回「容间≈吨位×5」的粗估，只用于兜底。
+        model_number = Decimal(str(volume_number)) / Decimal("5")
+        eligible = [item for item in candidates if item[0] <= model_number]
+        _, chosen = max(eligible, key=lambda item: item[0]) if eligible else min(candidates, key=lambda item: item[0])
+        return tonnage_key(chosen), None, prices[chosen]
+    eligible = [item for item in candidates if item[0] <= Decimal(str(volume_number))]
+    _, chosen = max(eligible, key=lambda item: item[0]) if eligible else min(candidates, key=lambda item: item[0])
+    return tonnage_key(chosen), None, prices[chosen]
+
+
 def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[str, Any] | None:
     eligible: list[tuple[Decimal, Mapping[str, Any]]] = []
-    for tier in catalog.get("tiers", []):
+    tiers = catalog.get("tiers", [])
+    highest_max: Decimal | None = None
+    for tier in tiers:
         try:
             minimum = Decimal(str(tier["min_volume"]))
         except Exception:
@@ -249,13 +325,23 @@ def _select_tier(volume_number: Decimal, catalog: Mapping[str, Any]) -> Mapping[
         maximum = tier.get("max_volume")
         if maximum is not None:
             try:
-                if volume_number >= Decimal(str(maximum)):
+                maximum_number = Decimal(str(maximum))
+                if highest_max is None or maximum_number > highest_max:
+                    highest_max = maximum_number
+                if volume_number >= maximum_number:
                     continue
             except Exception:
                 pass
         if volume_number >= minimum:
             eligible.append((minimum, tier))
-    return max(eligible, key=lambda item: item[0])[1] if eligible else None
+    if eligible:
+        return max(eligible, key=lambda item: item[0])[1]
+    # 容积超过价格表最高档：车装了 210 方，而合同价目只列到 205 方。
+    # 直接返回 None 会让这些行价格留空（9 月有 59 行），
+    # 按最高档计价并把结果标出来，比留空让人工逐行补更稳妥。
+    if tiers and highest_max is not None and volume_number >= highest_max:
+        return max(tiers, key=lambda t: Decimal(str(t.get("min_volume") or 0)))
+    return None
 
 
 def match_price(
@@ -365,7 +451,18 @@ def match_price(
             standard_price=standard,
             freight=float(freight) if freight % 1 else int(freight),
         )
-    tier_price = route_info.get("prices", {}).get(key)
+    if route_info.get("supplement"):
+        # 补充价目按「吨位档」列价（12/20/30/40A），而主价格表一干版是每 5 方一档
+        # （13/14/15…）。这里按容间换算出的吨位，落到不超过它的最大吨位档。
+        key, coefficient, tier_price = _supplement_tier(route_info, volume_number, catalog)
+    else:
+        tier_price = route_info.get("prices", {}).get(key)
+        if tier_price in (None, ""):
+            # 车装的方量超过了该路线价目表的最高有价档（9 月有 59 行，如佛山只列到 205 方
+            # 而实装 215 方）。按最高有价档计价并标出来，比整行留空更好核对。
+            fallback = _highest_priced_tier(route_info, catalog)
+            if fallback is not None:
+                key, coefficient, tier_price = fallback
     if tier_price in (None, ""):
         return PriceMatch(
             kind=resolved_kind,

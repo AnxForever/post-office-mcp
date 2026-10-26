@@ -14,7 +14,9 @@ from reconciliation.excel_io import (
     discover_workbooks,
     file_sha256,
     load_company_map,
+    read_measure_rows,
     read_online_rows,
+    read_vehicle_platform_rows,
     read_vehicle_rows,
 )
 from reconciliation.integrity import PHASE_ONE_ASSETS, asset_hashes, validate_assets, validate_vehicle_sources
@@ -24,7 +26,9 @@ from reconciliation.normalize import parse_month_token
 ROLE_LABELS = {
     "online_caotan": "草滩在线测量表",
     "online_gangwu": "港务在线测量表",
+    "online_measure": "车辆容积测量表",
     "vehicle": "车管基础数据",
+    "vehicle_platform": "车管平台汇总导出",
     "finance": "财务收入表",
     "draft_template": "初版生成模板",
     "first_price": "一干价格表",
@@ -43,6 +47,22 @@ REQUIRED_ROLES = {
     "second_price": 1,
     "first_profit_template": 1,
     "second_profit_template": 1,
+}
+# 输入可以按「两套口径」之一提供，二选一：
+#   逐场地口径：草滩在线表 + 港务在线表 + 6 家公司车管导出
+#   合并口径  ：容积测量表（一场一表合并导出）+ 车管平台汇总导出
+# 两套等价，不能混着用（混用会让容间与车管行对不上）。
+SOURCE_BUNDLES = {
+    "split": {
+        "label": "逐场地/逐公司导出",
+        "roles": {"online_caotan": 1, "online_gangwu": 1, "vehicle": 6},
+        "pattern_roles": ("online_caotan", "online_gangwu", "vehicle"),
+    },
+    "merged": {
+        "label": "合并导出",
+        "roles": {"online_measure": 1, "vehicle_platform": 1},
+        "pattern_roles": ("online_measure", "vehicle_platform"),
+    },
 }
 # 版式模板和合同价格表随包内置，角色固定；模板含全年页签、价格表只有单程/往返两页，
 # 都不参与目标月份推断，也不该因为客户没上传而被判成「缺文件」。
@@ -70,7 +90,7 @@ BUNDLED_PAIRS = {
         "profit_candidate",
     ),
 }
-PACKAGE_VERSION = "6.2.6"
+PACKAGE_VERSION = "6.3.0"
 
 
 def _parse_explicit_month(value: str | None) -> tuple[int, int] | None:
@@ -115,6 +135,9 @@ def _source_entry(profile: Any, explicit: tuple[int, int] | None) -> dict[str, A
 def _count_online_rows(profiles: list[Any], target: tuple[int, int]) -> tuple[int, int]:
     current = other = 0
     for profile in profiles:
+        if profile.role == "online_measure":
+            current += len(read_measure_rows(profile.path, target))
+            continue
         site = "草滩" if profile.role == "online_caotan" else "港务"
         current += len(read_online_rows(profile.path, target, site))
         for year, month in profile.months:
@@ -122,6 +145,32 @@ def _count_online_rows(profiles: list[Any], target: tuple[int, int]) -> tuple[in
             if candidate != target:
                 other += len(read_online_rows(profile.path, candidate, site))
     return current, other
+
+
+def _select_source_bundle(by_role: dict[str, list[Any]]) -> tuple[str, str]:
+    """判断这份输入走「逐场地/逐公司」还是「合并导出」口径。
+
+    两套数据不能混用：合并口径的容间与逐场地测量按不同规则取整，
+    混着读会让同一趟在两套取数之间来回跳。所以按上传的角色整包选一套，
+    另一套需要的角色直接不再要求，避免误报「缺 6 个车管文件」。
+    """
+    merged_roles = set(SOURCE_BUNDLES["merged"]["pattern_roles"])
+    # 逐场地口径只看草滩/港务：单独一家车管文件在合并口径里也常见，
+    # 拿它当「混用」会把正常的合并输入误判掉。
+    split_roles = {"online_caotan", "online_gangwu"}
+    has_merged = bool(merged_roles & set(by_role))
+    has_split = bool(split_roles & set(by_role))
+    if has_merged and has_split:
+        return "split", (
+            "同时识别到逐场地/逐公司导出与合并导出两类文件，按逐场地口径处理；"
+            "合并导出的文件已忽略"
+        )
+    if has_merged:
+        return "merged", (
+            f"本次按「{SOURCE_BUNDLES['merged']['label']}」口径核对："
+            "容积测量表 + 车管平台汇总导出"
+        )
+    return "split", ""
 
 
 def inspect_inputs(
@@ -203,13 +252,24 @@ def inspect_inputs(
         elif role != "draft_template":
             warnings.append(f"未上传{ROLE_LABELS[role]}，使用 Skill 内置模板")
     roles_required = dict(REQUIRED_ROLES, draft_template=1)
+    source_bundle, bundle_note = _select_source_bundle(by_role)
+    if bundle_note:
+        warnings.append(bundle_note)
+    if source_bundle == "merged":
+        # 合并口径：一张容积测量表 + 一张车管汇总，替代原来的 2+6 个文件。
+        for role in SOURCE_BUNDLES["split"]["roles"]:
+            roles_required.pop(role, None)
+        roles_required.update(SOURCE_BUNDLES["merged"]["roles"])
     active_profiles = {role: by_role.get(role, []) for role in roles_required}
     ignored_models = by_role.get("model", [])
     company_map: dict[str, Any] | None = None
     expected_role_counts = dict(roles_required)
     try:
         company_map = load_company_map(assets_root / "company-map.json")
-        expected_role_counts["vehicle"] = len(company_map["companies"])
+        # 只有逐公司口径才需要按公司数校验文件个数；
+        # 合并口径只有一张平台汇总，写回 6 会凭空要求 6 个车管文件。
+        if source_bundle == "split":
+            expected_role_counts["vehicle"] = len(company_map["companies"])
     except Exception as exc:
         fatal.append(f"company-map.json 无法读取: {exc}")
     if ignored_models:
@@ -241,8 +301,9 @@ def inspect_inputs(
                 "action": f"请确认使用哪一个{label}（识别到 {actual} 个：{'、'.join(names)}），"
                           "删除多余文件后重试",
             })
-    vehicle_paths = [item.path for item in active_profiles["vehicle"]]
-    if vehicle_paths and company_map is not None:
+    vehicle_paths = [item.path for item in active_profiles.get("vehicle", [])]
+    # 逐公司口径才检查公司映射；合并口径只有一张平台汇总，没有公司维度。
+    if vehicle_paths and company_map is not None and source_bundle == "split":
         vehicle_errors = validate_vehicle_sources(vehicle_paths, company_map)
         fatal.extend(vehicle_errors)
         for message in vehicle_errors:
@@ -262,12 +323,12 @@ def inspect_inputs(
     observed: list[tuple[int | None, int, str]] = []
     online_profiles: list[Any] = []
     for profile in profiles:
-        if profile.role not in REQUIRED_ROLES:
+        if profile.role not in roles_required:
             continue
         # 模板类工作簿自带全年页签，不能拿来推断目标月份。
         if profile.role in MONTH_AGNOSTIC_ROLES:
             continue
-        if profile.role in {"online_caotan", "online_gangwu"}:
+        if profile.role in {"online_caotan", "online_gangwu", "online_measure"}:
             online_profiles.append(profile)
             continue
         for token in profile.months:
@@ -299,6 +360,10 @@ def inspect_inputs(
 
     if explicit:
         for profile in online_profiles:
+            if profile.role == "online_measure":
+                # 合并测量表没有日页签，月份只能靠文件名；文件名不可靠时
+                # 用「读出来的行数」判断，而不是硬拦。
+                continue
             has_target_month = any(
                 observed_month == explicit[1] and (year is None or year == explicit[0])
                 for year, observed_month in profile.months
@@ -319,8 +384,11 @@ def inspect_inputs(
         "online_current": 0,
         "online_other": 0,
     }
-    if explicit and len(vehicle_paths) == expected_role_counts["vehicle"] and not any(
-        "车管" in item for item in fatal
+    if (
+        explicit
+        and source_bundle == "split"
+        and len(vehicle_paths) == expected_role_counts.get("vehicle", 0)
+        and not any("车管" in item for item in fatal)
     ):
         try:
             vehicle_rows = read_vehicle_rows(vehicle_paths, company_map)
@@ -368,10 +436,47 @@ def inspect_inputs(
                     "label": "车管基础数据",
                     "action": f"请上传统计月份为 {_month_text(explicit)} 的车管基础数据",
                 })
+    # 合并口径只有一张车管汇总，公司映射不适用；这里单独校验能否读出当月行。
+    merged_vehicle_paths = [item.path for item in active_profiles.get("vehicle_platform", [])]
+    if explicit and source_bundle == "merged" and merged_vehicle_paths and not any(
+        "车管" in item for item in fatal
+    ):
+        try:
+            platform_rows = read_vehicle_platform_rows(merged_vehicle_paths[0])
+        except Exception as exc:
+            fatal.append(f"车管平台汇总导出无法读取: {exc}")
+            missing_inputs.append({
+                "kind": "unreadable",
+                "role": "vehicle_platform",
+                "label": "车管平台汇总导出",
+                "action": f"车管平台汇总导出无法读取，请重新上传：{exc}",
+            })
+        else:
+            current = sum(
+                1 for row in platform_rows
+                if row["execution_date"] and (row["execution_date"].year, row["execution_date"].month) == explicit
+            )
+            month_counts["vehicle_current"] = current
+            month_counts["vehicle_other"] = len(platform_rows) - current
+            if not current:
+                fatal.append(f"车管平台汇总导出不包含目标月份 {_month_text(explicit)} 的有效记录")
+                missing_inputs.append({
+                    "kind": "month_mismatch",
+                    "role": "vehicle_platform",
+                    "label": "车管平台汇总导出",
+                    "action": f"请上传统计月份为 {_month_text(explicit)} 的车管平台汇总导出",
+                })
+            elif month_counts["vehicle_other"]:
+                warnings.append(f"车管平台汇总导出有{month_counts['vehicle_other']}条非目标月份记录，已排除")
     if explicit and not fatal:
         try:
+            online_sources = (
+                active_profiles.get("online_caotan", [])
+                + active_profiles.get("online_gangwu", [])
+                + active_profiles.get("online_measure", [])
+            )
             month_counts["online_current"], month_counts["online_other"] = _count_online_rows(
-                active_profiles["online_caotan"] + active_profiles["online_gangwu"], explicit
+                online_sources, explicit
             )
         except Exception as exc:
             fatal.append(f"在线测量表无法读取: {exc}")
@@ -395,6 +500,7 @@ def inspect_inputs(
         "sources": {role: [_source_entry(item, explicit) for item in items] for role, items in active_profiles.items()},
         "ignored_sources": {"model": [_source_entry(item, explicit) for item in ignored_models]},
         "month_counts": month_counts,
+        "source_bundle": source_bundle,
         "fatal_errors": fatal,
         "warnings": warnings,
         "profiles": [
@@ -424,6 +530,7 @@ def inspect_inputs(
         "assets_dir": str(assets_root.resolve()),
         "asset_hashes": asset_hashes(assets_root, PHASE_ONE_ASSETS) if check_assets else {},
         "expected_role_counts": expected_role_counts,
+        "source_bundle": source_bundle,
         "sources": result["sources"],
         "ignored_sources": result["ignored_sources"],
         "month_counts": month_counts,
