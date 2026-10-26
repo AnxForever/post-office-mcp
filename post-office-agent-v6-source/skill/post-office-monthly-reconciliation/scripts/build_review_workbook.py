@@ -10,6 +10,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
+from openpyxl import load_workbook
+
 from inspect_inputs import inspect_inputs
 from reconciliation.calculations import apply_cross_tonnage_flags
 from reconciliation.excel_io import (
@@ -237,6 +239,85 @@ def _merged_volume(
     return None, issues
 
 
+def _compare_with_official(
+    review_rows: list[dict[str, Any]],
+    base_report_path: Path,
+) -> dict[str, int]:
+    """按派车单号和官方基础报表逐单对价，不一致的行加标记。
+
+    官方 58 张路线表里有一批大车是按「封顶系数」计价的，各表封顶值不同
+    （东莞 1.106、北京 1.13、佛山 1.154…），规则尚未确认。这里不猜规则，
+    只把与官方不一致的行标橙，人工一眼能看到需要复核哪些。
+    容间差异同样标出来，但两者分开计数。
+    """
+    official: dict[str, dict[str, Any]] = {}
+    try:
+        workbook = load_workbook(base_report_path, read_only=True, data_only=True, keep_links=False)
+    except Exception:
+        return {"available": 0, "price_diff": 0, "volume_diff": 0}
+    try:
+        for sheet in workbook.worksheets:
+            if hasattr(sheet, "reset_dimensions"):
+                sheet.reset_dimensions()
+            stream = sheet.iter_rows(values_only=True)
+            header = next(stream, None) or ()
+            columns: dict[str, int] = {}
+            for index, value in enumerate(header):
+                key = normalize_text(value)
+                if key and key not in columns:
+                    columns[key] = index
+            dispatch_column = columns.get("派车单号")
+            if dispatch_column is None:
+                continue
+            price_column = columns.get("运价")
+            volume_column = columns.get("容间")
+            for row in stream:
+                if dispatch_column >= len(row):
+                    continue
+                key = normalize_text(row[dispatch_column])
+                if not key:
+                    continue
+                official.setdefault(key, {
+                    "price": row[price_column] if price_column is not None and price_column < len(row) else None,
+                    "volume": row[volume_column] if volume_column is not None and volume_column < len(row) else None,
+                })
+    finally:
+        workbook.close()
+    if not official:
+        return {"available": 0, "price_diff": 0, "volume_diff": 0}
+
+    price_diff = volume_diff = compared = 0
+    for row in review_rows:
+        entry = official.get(normalize_text(row.get("dispatch_no")))
+        if entry is None:
+            continue
+        compared += 1
+        issues = row.setdefault("issues", [])
+        if not _close(row.get("volume"), entry.get("volume"), 0.51):
+            volume_diff += 1
+            issues.append(Issue(
+                "official_volume_diff", "orange",
+                f"容间与官方报表不一致（本表 {row.get('volume')}，官方 {entry.get('volume')}）",
+                "核对车辆实测容间",
+            ))
+        if not _close(row.get("freight"), entry.get("price"), 0.51):
+            price_diff += 1
+            issues.append(Issue(
+                "official_price_diff", "orange",
+                f"运价与官方报表不一致（本表 {row.get('freight')}，官方 {entry.get('price')}）",
+                "核对价格表档位或封顶规则",
+            ))
+    return {"available": compared, "price_diff": price_diff, "volume_diff": volume_diff}
+
+
+def _close(left: Any, right: Any, tolerance: float) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except (TypeError, ValueError):
+        # 两边都空算一致；一边空一边有值算不一致。
+        return (left in (None, "")) and (right in (None, ""))
+
+
 def _is_current_month_vehicle_row(row: Mapping[str, Any], year: int, month: int) -> bool:
     execution_date = row.get("execution_date")
     return bool(
@@ -284,6 +365,8 @@ def build_review_workbook(
     measure_paths = _source_paths(state, "online_measure")
     vehicle_paths = _source_paths(state, "vehicle")
     platform_paths = _source_paths(state, "vehicle_platform")
+    # 基础报表原版是可选的：传了就用来逐单对价，没传就跳过。
+    base_report_paths = _source_paths(state, "base_report")
     first_price_paths = _source_paths(state, "first_price")
     second_price_paths = _source_paths(state, "second_price")
     draft_template_paths = _source_paths(state, "draft_template")
@@ -422,6 +505,12 @@ def build_review_workbook(
             "issues": issues,
         })
     apply_cross_tonnage_flags(review_rows)
+    # 上传了基础报表原版时，逐单和官方报价比一遍，把对不上的行标出来。
+    # 价格表里有一批大车走的是封顶系数，各表封顶值不同（1.106/1.13/1.154 都出现过），
+    # 规则没确认前不猜，只如实标记，由人工核对。
+    comparison_stats: dict[str, int] = {}
+    if base_report_paths:
+        comparison_stats = _compare_with_official(review_rows, base_report_paths[0])
 
     # 反向补充：在线表有测量记录但车管无派车数据的行
     for model in model_summary_rows:
@@ -558,6 +647,7 @@ def build_review_workbook(
             "model_summary_all_zero": len(model_summary_rows) - nonzero_selections,
             "formula_volume_recalculated": formula_recalculated,
             "authoritative_vehicle_rows": count,
+            "official_comparison": comparison_stats,
             "model_summary_matched": model_matched,
             "model_summary_unmatched": count - model_matched,
             "price_unmatched": count - price_matched,

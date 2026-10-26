@@ -464,6 +464,13 @@ def _phase_roles(phase: str, detected: list | None = None) -> dict[str, int] | N
     return None
 
 
+# 可选角色：上传了就参与（基础报表原版用于逐单对价），没上传不影响流程。
+OPTIONAL_PHASE_ROLES = {
+    "review": {"base_report": 1},
+    "summary": {"base_report": 1},
+}
+
+
 # 版式模板和合同价格表都是半年甚至整年才换一次，客户上传了就用客户的（可能更新），
 # 没上传就用包里的。动态数据（在线表、车管、财务）仍然必须每月上传。
 BUNDLED_INPUT_ASSETS = {
@@ -552,6 +559,11 @@ def detect_for_phase(workspace: Path | str, month: str | None, phase: str) -> di
     roles = _phase_roles(phase, uploaded)
     if roles is None:
         raise ValueError(f"不支持的阶段: {phase}")
+    # 可选角色只在用户真上传了才加进来，避免不上传就报缺文件。
+    uploaded_roles = {item.role for item in uploaded}
+    for role, count in OPTIONAL_PHASE_ROLES.get(phase, {}).items():
+        if role in uploaded_roles:
+            roles.setdefault(role, count)
     detected, bundled = _with_bundled_inputs(uploaded, roles)
     resolution = resolve(detected, roles)
     bundled_prices = [

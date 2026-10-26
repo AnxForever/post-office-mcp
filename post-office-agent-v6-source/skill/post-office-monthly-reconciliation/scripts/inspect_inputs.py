@@ -497,7 +497,15 @@ def inspect_inputs(
         "files_found": len(files),
         "missing_inputs": missing_inputs,
         "roles": {role: [str(item.path) for item in items] for role, items in by_role.items() if role not in {"unknown", "damaged"}},
-        "sources": {role: [_source_entry(item, explicit) for item in items] for role, items in active_profiles.items()},
+        "sources": {
+            **{role: [_source_entry(item, explicit) for item in items] for role, items in active_profiles.items()},
+            # 基础报表原版是可选输入：传了就用它逐单对价，没传不影响流程，
+            # 所以不进 roles_required，只在这里带上（有才带）。
+            **(
+                {"base_report": [_source_entry(item, explicit) for item in by_role["base_report"]]}
+                if by_role.get("base_report") else {}
+            ),
+        },
         "ignored_sources": {"model": [_source_entry(item, explicit) for item in ignored_models]},
         "month_counts": month_counts,
         "source_bundle": source_bundle,
