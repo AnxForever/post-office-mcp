@@ -148,6 +148,11 @@ def _baseline_price(
     12吨" holds 30吨价×0.63. The official report therefore prints that base
     price in 标准价 and the selected tier's cell value in 运价.
     """
+    # 补充价目的标准价是整条路线固定的一档基准价，官方表里每条线只有一个值，
+    # 直接取，不要再用主表档位反推（兰州会算成 4943.08 而不是 5100）。
+    declared = route_info.get("standard_price")
+    if declared not in (None, ""):
+        return declared
     prices = route_info.get("prices", {})
     for tier in catalog.get("tiers", []):
         try:

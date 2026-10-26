@@ -1125,6 +1125,7 @@ def _merge_route_supplement(catalog: dict[str, Any], assets_dir: Path | None = N
         catalog["routes"][name] = {
             "distance": _to_number(entry.get("distance")),
             "prices": cleaned,
+            "standard_price": _to_number(entry.get("standard_price")),
             "volume_thresholds": thresholds,
             "sheet": "补充价目",
             "kind": catalog.get("kind"),
