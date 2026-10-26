@@ -12,6 +12,7 @@ _归档/
 # 打包产物与交付件（由脚本生成，不入库）
 *.zip
 输出/
+交付说明/
 post-office-agent-v6-source/agent.zip
 post-office-agent-v6-source/skill.zip
 
