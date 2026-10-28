@@ -7,6 +7,23 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
 
 只运行 Skill 中经批准的脚本。不编写临时数据处理代码，不用其他表格工具重算或改写结果。
 
+## 只要一干/二干盈亏表（最常见）
+
+用户给了「基础报表原版」+「财务收入表」（运输局表）时，**直接执行下面这一条，不要先跑 detect**。
+`--phase profit` 内部会自己识别文件和目标月份，识别不出来会返回 `needs_input`。
+
+```python
+import runpy, sys
+sys.path.insert(0, "/workspace/skills/post-office-monthly-reconciliation/scripts")
+sys.argv = ["agentos_entrypoint.py", "--phase", "profit", "--workspace", "/workspace"]
+runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/agentos_entrypoint.py", run_name="__main__")
+```
+
+- 返回 `status:"profit_completed"` 就是做完了：立刻汇报两张表的文件名、趟次、收入匹配，
+  **不要再执行任何脚本，也不要回头跑 detect**（平台会把连续相同的工具结果判为空转并中止任务）。
+- 返回 `ok:false`（`month_mismatch` / `unreadable_base` / `empty_base` / `finance_mismatch`）时，
+  把 `message` 原样告诉用户，不要重试、不要换文件硬跑。
+
 ## 先判断任务
 
 - 仅要车型汇总表：执行 `build_model_summary.py`，只需草滩和港务在线表。
@@ -25,6 +42,12 @@ description: 邮局月度委办运输报表核对与生成技能。用于用户�
    不要自己猜文件名。上传目录随平台版本变化（旧版 `/workspace`，新版 `/inputs`），
    脚本会自动解析并在 `--phase list` 的 `input_dir` 中返回真实位置。
 4. 每个阶段只执行一次对应脚本，只依据末尾 JSON 汇报结果。
+   **脚本一旦返回 `ok:true` / `status` 为完成态 / `published` 非空，就是已经做完，立即向用户汇报。**
+   不要为了确认再执行同一脚本，也不要回头重跑 `--phase detect`：
+   平台会把连续相同的工具结果判为「空转」并直接中止任务，用户看到的就是
+   「检测到 code.execute 已连续多轮返回完全相同的结果」而不是交付说明。
+   成功报告的前几个字段（`ok`、`status`、`month`、`income_match`、`published`、
+   `outputs`）就是汇报要用的全部结论，后面的明细只是补充说明。
 5. 保留同一任务的 `/workspace/output/run-state.json`；第二阶段不得换工作区。
 6. `status:"needs_input"`（`ok:true`）表示输入不全，不是执行失败：把
    `missing_inputs[].action` 逐条告诉用户，请其补充后重试；已识别文件会保留。
@@ -267,6 +290,28 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/age
   车牌本月无派车记录、无法逐趟配对时，按邮路名称归到该路线现有最高吨位档。
 - 盈亏 = 结算收入 − 运费。
 - 吨位档由归类后的当月数据决定（按数值升序），模板过期档名不会带进来。
+- **一/二干归属以财务收入表的邮路级别为准**，基础报表的 sheet 名（一干汇总/二干基础）只是兜底。
+  两边冲突时按财务表归并，并在输出的 `level_reclassified` 里逐条列出（路线、原级别、新级别、趟次、运费）。
+- **吨位档：基础报表给了 `吨位` 列就用吨位列，没有才按 `容间` 推导。**
+  基础报表没有 `吨位` 列时（车管平台汇总导出按「系数 × 基准运价」计价，不记车型档），
+  按 `容间` 推导，`tonnage_source` 标注「容间推导」。区间直接取两张价格表写明的容积下限，
+  不自拟阈值：`≥55→12、≥100→20、≥130→30、≥150→40A、≥180→40B`
+  （二干再细到 `≥16→3、≥35→5、≥45→8`；一干干线车最低按 12 吨）。
+  这条线与 `assets/route-supplement.json` 记的官方专线定档（兰州 127 方→20、130~143 方→30、
+  153 方以上→40A）一致。
+
+### 出表前的四道硬闸门（都不出表，退出码 2）
+
+盈亏表一旦出成上个月的数、或者一干整张空着，比不出表更糟。以下情况直接停：
+
+| `status` | 触发条件 | 说明 |
+|---|---|---|
+| `month_mismatch` | 基础报表的业务日期和 `--month` 对不上 | 文件名写 9 月、里面是 8 月的数据，已经真实发生过 |
+| `unreadable_base` | 一干汇总/二干基础 缺列读不出来 | 输出里带实际表头，便于让用户补正确导出 |
+| `empty_base` | 汇总 sheet 一行有效数据都没有 | 以前会静默出一张「合计 0」的表 |
+| `finance_mismatch` | 超过一半派车记录配不上财务表 | 两份文件不是同一个月 |
+
+汇报时把 `message` 原样转给用户，不要自己判断“应该还能用”。
 - 路线顺序按当月数据出现顺序；模板里当月无数据的路线只在传了 `--tpl-dir` 时追加为占位。
 
 汇报规则：

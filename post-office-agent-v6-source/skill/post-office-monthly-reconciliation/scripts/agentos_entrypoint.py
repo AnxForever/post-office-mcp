@@ -346,26 +346,46 @@ def main(argv: list[str] | None = None) -> int:
         if gaps:
             # 输入不全不是执行失败：返回 needs_input，让 Agent 请用户补文件。
             payload = {
-                **result,
                 "ok": True,
                 "status": "needs_input",
                 "phase": "awaiting_inputs",
                 "task_phase": result["phase"],
+                "target_month": args.month,
                 "missing_inputs": gaps,
+                "missing": result.get("missing", []),
+                "ambiguous": result.get("ambiguous", []),
                 "message": needs_input_message(gaps),
                 "next_action": "请补充或确认上述文件后重新执行；已识别到的文件会保留。",
+                **{k: v for k, v in result.items()
+                   if k not in {"phase", "files", "missing_inputs", "message", "next_action",
+                                "resolved", "missing", "ambiguous"}},
+                "files": result.get("files", []),
+                "resolved": result.get("resolved", {}),
             }
+            print(f"[STOP] 还缺输入：{'、'.join(item['label'] for item in gaps)}。"
+                  "按 missing_inputs 请用户补齐，不要自己猜文件名。")
         else:
             payload = {
-                **result,
                 "ok": True,
                 "status": "ready",
                 "phase": "detected",
                 "task_phase": result["phase"],
+                "target_month": args.month,
+                "resolved": result.get("resolved", {}),
                 "missing_inputs": [],
+                "missing": result.get("missing", []),
+                "ambiguous": result.get("ambiguous", []),
                 "next_action": "输入齐全，可继续执行该阶段。",
+                **{k: v for k, v in result.items()
+                   if k not in {"phase", "files", "missing", "ambiguous", "resolved"}},
+                "files": result.get("files", []),
             }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+            names = [Path(p).name for paths in result.get("resolved", {}).values() for p in paths]
+            print(f"[OK] 识别完成（目标月 {args.month}）：{'、'.join(names)}。"
+                  "输入齐全，直接执行下一步，不要重跑 detect。")
+        # 紧凑输出：平台会按长度截断工具结果，缩进版体积翻倍，
+        # 一旦被截断模型看不到结论，就会反复重跑同一阶段（线上真实踩过）。
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
 
     if args.phase == "runtime":

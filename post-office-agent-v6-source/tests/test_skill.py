@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -734,7 +735,19 @@ def check_publish() -> None:
 
 def check_package() -> None:
     manifest = json.loads((SKILL / "manifest.json").read_text(encoding="utf-8"))
-    record("package: 版本 6.3.3", manifest.get("version") == "6.3.3", manifest.get("version", ""))
+    # 技能可以单独升级（专家提示词没变就不用重发专家），但不能比专家旧：
+    # 比专家旧意味着线上专家绑着一个过期口径的技能。
+    agent_yaml = (PACKAGE / "agent" / "agent.yaml").read_text(encoding="utf-8")
+    agent_version = re.search(r'^version:\s*"?([\d.]+)"?', agent_yaml, re.M).group(1)
+
+    def as_tuple(text):
+        return tuple(int(p) for p in text.split("."))
+
+    record(
+        f"package: 技能版本不低于专家版本（skill {manifest.get('version')} / agent {agent_version}）",
+        as_tuple(manifest.get("version", "0")) >= as_tuple(agent_version),
+        f"manifest={manifest.get('version')} agent={agent_version}",
+    )
     import zipfile
 
     zips = list(ROOT.glob("post-office-monthly-reconciliation-skill.zip"))

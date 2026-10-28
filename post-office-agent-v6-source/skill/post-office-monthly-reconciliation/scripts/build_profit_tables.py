@@ -94,10 +94,68 @@ def month_day(value) -> str:
     return ""
 
 
-def _read_summary_sheets(base_path: Path) -> tuple[dict, dict]:
-    """返回 ({(level,route,ton): [trips, transport, freight]}, trips 列表)。
+def year_month(value) -> tuple[int, int] | None:
+    """封车时间 -> (年, 月)，用于校对基础报表是不是目标月份的数据。"""
+    if isinstance(value, datetime):
+        return (value.year, value.month)
+    text = str(value or "").strip()
+    match = re.match(r"(\d{4})\s*[-/.年]\s*(\d{1,2})", text)
+    if match:
+        return (int(match.group(1)), int(match.group(2)))
+    return None
 
-    level 由来源 sheet 决定：一干汇总 -> 一干，二干基础 -> 二干。
+
+def _column(header, *names):
+    """按表头别名找列号（不同导出格式同一列叫法不同）。"""
+    for name in names:
+        for i, value in enumerate(header):
+            if str(value or "").strip() == name:
+                return i
+    return None
+
+
+# 「容间 → 吨位档」：直接取两张价格表写明的容积下限，不自己拟阈值。
+# 二干价格表第 4 行：3吨≥16、5吨≥35、8吨≥45、12吨≥55、20吨≥100、
+#                   30吨≥130、40A≥150、40B≥180（m³）
+# 一干价格表表头同样标注：5吨≥35、8吨≥45、12吨≥55，20/30/40 与二干同一条线。
+# 这也与 assets/route-supplement.json 记的官方专线定档一致
+# （兰州 127 方→20 吨、130~143 方→30 吨、153 方以上→40A）。
+_TIER_LINES = (
+    (180, "40B"),
+    (150, "40A"),
+    (130, "30"),
+    (100, "20"),
+    (55, "12"),
+    (45, "8"),
+    (35, "5"),
+    (16, "3"),
+)
+
+
+def _tier_from_volume(volume, level: str) -> str:
+    """容间 -> 车型档。只有基础报表没有「吨位」列时才用（有吨位列一律用吨位列）。
+
+    区间就是价格表的容积下限；一干干线车最低按 12 吨计（8/5/2.75 吨只出现在
+    一干价格表的低价系数列，盈亏表历史口径里一干从未出现这些档）。
+    """
+    try:
+        value = float(volume)
+    except (TypeError, ValueError):
+        return ""
+    floor = "12" if level == "一干" else "3"
+    for lower, tier in _TIER_LINES:
+        if value >= lower:
+            if level == "一干" and tier in {"3", "5", "8"}:
+                return floor
+            return tier
+    return floor
+
+
+def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
+    """返回 ({(level,route,ton): [trips, transport, freight]}, trips 列表, 诊断信息)。
+
+    level 先由来源 sheet 决定（一干汇总 -> 一干，二干基础 -> 二干），
+    之后 _reclassify_by_finance 会按财务收入表的邮路级别纠正。
 
     吨位按「结算吨位」归类（客户确认口径）：
       1. 备注写「调度通知按 30 吨结算」「两辆12吨车合并为一辆30吨车」的，
@@ -106,41 +164,88 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict]:
 
     注意：基础报表「吨位」列是车辆车型档，备注才是实际结算档。
     8 月一干 40A/40B 全部备注「按30吨结算」，因此整行计入 30 吨档。
+
+    表头按别名匹配：官方导出是 吨位/运输量/封车时间，车管平台汇总导出是
+    系数/邮运量/邮路执行日期。认不出来的 sheet 记进诊断信息，交给调用方报错，
+    绝不静默跳过（跳过会让一干表整张变成空表，而退出码仍是 0）。
     """
-    base: dict[tuple[str, str, str], list] = defaultdict(lambda: [0, 0.0, 0.0])
     trips: list[dict] = []
+    diag: dict[str, dict] = {}
+    months: dict[tuple[int, int], int] = defaultdict(int)
     workbook = openpyxl.load_workbook(base_path, read_only=True, data_only=True)
     try:
         for sheet, level in (("一干汇总", "一干"), ("二干基础", "二干")):
             if sheet not in workbook.sheetnames:
+                diag[sheet] = {"status": "missing"}
                 continue
             rows = list(workbook[sheet].iter_rows(values_only=True))
             if not rows:
+                diag[sheet] = {"status": "empty"}
                 continue
             idx = _header_index(rows[0])
-            if "吨位" not in idx or "运价" not in idx:
+            c_ton = _column(rows[0], "吨位")
+            c_vol = _column(rows[0], "容间")
+            c_qty = _column(rows[0], "运输量", "邮运量")
+            c_time = _column(rows[0], "封车时间", "邮路执行日期", "邮路执行时间")
+            c_price = _column(rows[0], "运价")
+            c_plate = _column(rows[0], "车牌号")
+            missing = []
+            if c_ton is None and c_vol is None:
+                missing.append("吨位/容间")
+            if c_qty is None:
+                missing.append("运输量/邮运量")
+            if c_time is None:
+                missing.append("封车时间/邮路执行日期")
+            if c_price is None:
+                missing.append("运价")
+            if c_plate is None:
+                missing.append("车牌号")
+            if missing:
+                diag[sheet] = {
+                    "status": "unreadable",
+                    "missing_headers": missing,
+                    # 车管平台汇总导出：一干按「系数 × 基准运价」计价，不记吨位档
+                    "coefficient_export": c_ton is None and _column(rows[0], "系数") is not None,
+                    "headers": [str(v).strip() for v in rows[0] if str(v or "").strip()],
+                }
                 continue
+            from_volume = c_ton is None
             route_col = _route_column(rows[0], idx)
             remark_col = idx.get("备注")
+            parsed = 0
+            no_tier = 0
             for row in rows[1:]:
                 if not (row and isinstance(row[0], int)):
                     continue
                 route = normalize_route(row[route_col])
-                tonnage = str(row[idx["吨位"]] or "").strip()
+                tonnage = (str(row[c_ton] or "").strip() if not from_volume
+                           else _tier_from_volume(row[c_vol], level))
                 if not route or not tonnage:
+                    no_tier += 1 if route else 0
                     continue
+                stamp = year_month(row[c_time])
+                if stamp:
+                    months[stamp] += 1
                 trips.append({
                     "level": level,
                     "route": route,
                     "tonnage": tonnage,
-                    "plate": str(row[idx["车牌号"]] or "").strip(),
-                    "mmdd": month_day(row[idx["封车时间"]]),
+                    "plate": str(row[c_plate] or "").strip(),
+                    "mmdd": month_day(row[c_time]),
                     "remark": str(row[remark_col] or "").strip() if remark_col is not None else "",
-                    "transport": float(row[idx["运输量"]] or 0),
-                    "freight": float(row[idx["运价"]] or 0),
+                    "transport": float(row[c_qty] or 0),
+                    "freight": float(row[c_price] or 0),
                 })
+                parsed += 1
+            diag[sheet] = {
+                "status": "ok", "rows": len(rows) - 1, "parsed": parsed,
+                "tonnage_source": "容间推导" if from_volume else "吨位列",
+            }
+            if no_tier:
+                diag[sheet]["rows_without_tonnage"] = no_tier
     finally:
         workbook.close()
+    diag["months"] = {f"{y:04d}-{m:02d}": n for (y, m), n in sorted(months.items())}
 
     # 结算吨位：备注优先，否则该车该路线最低档
     grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
@@ -151,12 +256,114 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict]:
         for trip in group:
             trip["tonnage"] = _remark_tier(trip["remark"]) or lowest
 
+    return _aggregate_base(trips), trips, diag
+
+
+def _aggregate_base(trips: list[dict]) -> dict:
+    """(level, route, tonnage) -> [趟次, 装载量, 运费]。"""
+    base: dict[tuple[str, str, str], list] = defaultdict(lambda: [0, 0.0, 0.0])
     for trip in trips:
         slot = base[(trip["level"], trip["route"], trip["tonnage"])]
         slot[0] += 1
         slot[1] += trip["transport"]
         slot[2] += trip["freight"]
-    return base, trips
+    return base
+
+
+def _finance_route_levels(exact: dict) -> dict[str, str]:
+    """财务收入表里每条标准路线的一/二干归属（按行数取多数）。"""
+    votes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for entries in exact.values():
+        for entry in entries:
+            level = "一干" if "一干" in str(entry.get("level", "")) else "二干"
+            votes[normalize_route(entry["route"])][level] += 1
+    return {route: max(counts, key=counts.get) for route, counts in votes.items()}
+
+
+def _reclassify_by_finance(trips: list[dict], levels: dict[str, str]) -> list[dict]:
+    """一/二干以客户结算口径（财务收入表）为准，基础报表的 sheet 名只是兜底。
+
+    9 月就踩过一次：平凉/固原/陇南/天水/庆阳 220 趟被车管记进「一干汇总」，
+    财务收入表全部记为二干；归回二干后两边委办趟次才和运输局对上（1453/1803）。
+    """
+    moved: dict[tuple[str, str, str], dict] = {}
+    for trip in trips:
+        target = levels.get(trip["route"])
+        if not target or target == trip["level"]:
+            continue
+        slot = moved.setdefault(
+            (trip["route"], trip["level"], target),
+            {"trips": 0, "transport": 0.0, "freight": 0.0},
+        )
+        slot["trips"] += 1
+        slot["transport"] += trip["transport"]
+        slot["freight"] += trip["freight"]
+        trip["level"] = target
+    return [
+        {"route": route, "from": src, "to": dst, "trips": v["trips"],
+         "transport": round(v["transport"], 2), "freight": round(v["freight"], 2)}
+        for (route, src, dst), v in sorted(moved.items())
+    ]
+
+
+def _base_guard(diag: dict, year: int, month: int) -> dict | None:
+    """核对基础报表原版：读不出来、整张为空、或月份对不上，都必须硬失败。
+
+    这三种情况以前都会「照常出表」：一干汇总被静默跳过 -> 一干表只有合计 0 行；
+    上传成上个月的文件 -> 出一张上个月的表，只是名字跟着数据变。都不该继续。
+    """
+    absent = [s for s in ("一干汇总", "二干基础") if diag.get(s, {}).get("status") == "missing"]
+    if absent:
+        return {
+            "status": "missing_base_sheet",
+            "message": f"基础报表原版里没有 {'、'.join(absent)} 工作表",
+            "next_action": "请上传官方格式的基础报表原版（含 一干汇总/二干基础 两个 sheet）。",
+        }
+
+    unusable = {s: d for s, d in diag.items()
+                if s in ("一干汇总", "二干基础") and d.get("status") == "unreadable"}
+    if unusable:
+        coefficient = [s for s, d in unusable.items() if d.get("coefficient_export")]
+        if coefficient:
+            return {
+                "status": "need_official_base",
+                "message": f"基础报表原版的 {'、'.join(coefficient)} 是车管平台汇总导出："
+                           f"只有「系数」计价，没有「吨位」列，无法拆成 12/20/30 吨车型档。",
+                "next_action": "请上传官方格式的基础报表原版（像上个月那样，一干汇总里带「吨位」列），"
+                               "车管平台汇总的版本不能用来做一干盈亏表。",
+            }
+        detail = "；".join(
+            f"{sheet} 缺少列 {d['missing_headers']}（实际表头：{'、'.join(d['headers'])}）"
+            for sheet, d in unusable.items()
+        )
+        return {
+            "status": "unreadable_base",
+            "message": f"基础报表原版的工作表读不出来：{detail}",
+            "next_action": "请上传官方格式的基础报表原版（含 一干汇总/二干基础 两个 sheet），"
+                           "或把该导出格式发给我们适配。",
+        }
+
+    empty = [s for s in ("一干汇总", "二干基础")
+             if diag.get(s, {}).get("status") in ("ok", "empty") and not diag[s].get("parsed")]
+    if empty:
+        return {
+            "status": "empty_base",
+            "message": f"基础报表原版的 {'、'.join(empty)} 一行有效数据都没读到"
+                       f"（该 sheet 共 {diag[empty[0]].get('rows', 0)} 行）",
+            "next_action": "请确认该 sheet 有当月派车记录后重试。",
+        }
+
+    months = diag.get("months") or {}
+    target = f"{year:04d}-{month:02d}"
+    if months and target not in months:
+        found = "、".join(f"{name}（{count} 行）" for name, count in months.items())
+        return {
+            "status": "month_mismatch",
+            "message": f"基础报表原版的业务日期是 {found}，和目标月份 {target} 对不上",
+            "next_action": f"请确认上传的是 {target} 的基础报表原版；"
+                           "文件名写着 9 月但内容是 8 月的情况已经出过一次，务必核对数据日期。",
+        }
+    return None
 
 
 def _read_finance(finance_path: Path) -> tuple[dict, dict, dict]:
@@ -834,9 +1041,41 @@ def main(argv=None) -> int:
         print(f"[WARN] 输出目录不可写: {args.out}，改用 {fallback.resolve()}")
         args.out = fallback
 
-    base, trips = _read_summary_sheets(args.base)
+    base, trips, diag = _read_summary_sheets(args.base)
+    guard = _base_guard(diag, year, month)
+    if guard:
+        print(f"[STOP] 基础报表原版不可用于 {args.month}：{guard.get('message', '')}")
+        print(json.dumps({
+            "ok": False,
+            "phase": "base_report_check",
+            "month": args.month,
+            "base_sheets": diag,
+            **guard,
+        }, ensure_ascii=False, indent=2))
+        return 2
     exact, by_plate, reverse_income = _read_finance(args.finance)
+    # 一/二干归属以财务收入表为准（基础报表 sheet 名只是兜底）
+    reclassified = _reclassify_by_finance(trips, _finance_route_levels(exact))
+    if reclassified:
+        base = _aggregate_base(trips)
     _income_flat, stats, misses = allocate_income(trips, exact, by_plate, year)
+    # 财务表和基础报表不是同一个月时，逐趟几乎配不上：收入会大面积记 0，
+    # 出的表看起来有数、其实是漏的。超过一半配不上就停下来问。
+    if trips and len(misses) > len(trips) * 0.5:
+        print(f"[STOP] 财务收入表和基础报表原版对不上：{len(misses)}/{len(trips)} 条派车记录配不上收入。")
+        print(json.dumps({
+            "ok": False,
+            "phase": "finance_check",
+            "month": args.month,
+            "detail_rows": len(trips),
+            "income_match": stats,
+            "status": "finance_mismatch",
+            "message": f"财务收入表 {len(misses)}/{len(trips)} 条派车记录配不上（车牌+日期），"
+                       "两份文件很可能不是同一个月的",
+            "next_action": "请确认财务收入表（运输局）和基础报表原版是同月的；"
+                           "财务表通常是次月结算，但业务日期要覆盖当月。",
+        }, ensure_ascii=False, indent=2))
+        return 2
     trip_income = _trip_level_income(trips, exact, by_plate, year)
     income = _bucket_income(trips, trip_income)
     income = _apply_reverse_income(income, trips, reverse_income)
@@ -863,17 +1102,9 @@ def main(argv=None) -> int:
             bucket = sorted({k for r, k in candidates if r == top})[-1]
             income[(lvl, route, bucket)] += float(entry["net"])
 
-    report = {
-        "month": args.month,
-        "basis": "source-data-first",
-        "tonnage_source": "基础报表原版（一干汇总/二干基础）的吨位列",
-        "income_source": "财务收入表 结算收入-普服收入（额定吨位/实载重量不参与分档）",
-        "detail_rows": len(trips),
-        "income_match": stats,
-        "reverse_income": {k: round(v, 2) for k, v in reverse_income.items()},
-        "unmatched": len(misses),
-        "outputs": [],
-    }
+    derived = [s for s, d in diag.items()
+               if isinstance(d, dict) and d.get("tonnage_source") == "容间推导"]
+    deliverables: list[dict] = []
     for level, filename in (("一干", "一干委办盈亏.xlsx"), ("二干", "二干委办盈亏.xlsx")):
         template_labels: list[str] = []
         template_routes: list[str] = []
@@ -906,23 +1137,50 @@ def main(argv=None) -> int:
 
         out_path = args.out / f"{month}月_04_{level}盈亏表.xlsx"
         totals = _write(level, labels, route_order, scoped_base, scoped_income, out_path, year, month, tonnage_map)
-        report["outputs"].append({
+        deliverables.append({
             "level": level,
-            "path": str(out_path),
-            "template": template_status,
+            "file": out_path.name,
+            "total_trips": sum(bucket[0] for bucket in totals.values()),
+            "routes": len(route_order),
             "tonnage_groups": labels,
             "tonnage_merge": merged,
-            "routes": len(route_order),
-            "placeholder_routes": len([r for r in route_order if r not in
-                                       {t["route"] for t in trips if t["level"] == level}]),
-            "total_trips": sum(bucket[0] for bucket in totals.values()),
+            "template": template_status,
         })
 
-    report["unmatched_samples"] = misses[:20]
-    report["published"] = publish_files(
-        Path(item["path"]) for item in report["outputs"]
-    )
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    published = [
+        {"name": item["name"], "size": item["size"]}
+        for item in publish_files(Path(args.out) / f"{month}月_04_{level}盈亏表.xlsx"
+                                  for level in ("一干", "二干"))
+    ]
+    # 字段顺序有讲究：平台会截断过长的工具输出，模型只看得见前面一段。
+    # 决定「要不要重跑」的 ok/status/published 排在前面，明细行次之，
+    # 重分类清单和未匹配样例放最后，被截断也不影响出表判断。
+    report = {
+        "ok": True,
+        "status": "profit_completed",
+        "month": args.month,
+        "detail_rows": len(trips),
+        "income_match": stats,
+        "unmatched": len(misses),
+        "published": published,
+        "outputs": deliverables,
+        "next_action": "已出表并发布，直接汇报，不要再执行本脚本或重新 detect。",
+        "tonnage_source": "基础报表原版（一干汇总/二干基础）的吨位列"
+                          + (f"；{'、'.join(derived)} 没有吨位列，按价格表容积下限推导"
+                             if derived else ""),
+        "level_source": "一/二干以财务收入表的邮路级别为准，基础报表 sheet 名兜底",
+        "level_reclassified": [
+            {"route": item["route"], "from": item["from"], "to": item["to"],
+             "trips": item["trips"], "freight": round(item["freight"], 2)}
+            for item in reclassified
+        ],
+        "reverse_income": {k: round(v, 2) for k, v in reverse_income.items()},
+        "unmatched_samples": misses[:5],
+    }
+    names = "、".join(item["file"] for item in deliverables)
+    scale = "，".join(f"{item['level']} {item['total_trips']} 趟" for item in deliverables)
+    print(f"[OK] 已出表并发布：{names}（{scale}）。直接汇报，不要重跑本脚本或 detect。")
+    print(json.dumps(report, ensure_ascii=False))
     return 0
 
 
