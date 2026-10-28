@@ -465,6 +465,42 @@ def check_profit() -> None:
         )
 
 
+def check_profit_month_rule() -> None:
+    """月份规则：数据比目标月新 -> 按数据出表；数据比目标月旧 -> 停下不出表。
+
+    文件名写错和文件没更新要分开处理：前者不该拦，后者必须拦。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # 3 月的数据，参数写 2 月：数据更新，按 2026-03 出表并附说明
+        _, payload = run_phase(
+            "--phase", "profit", "--month", "2026-02",
+            "--workspace", str(MARCH), "--output-dir", tmp,
+        )
+        outputs = payload.get("outputs", [])
+        record("month rule: 数据比目标月新时按数据出表", len(outputs) == 2,
+               str(payload.get("errors") or payload)[:300])
+        record("month rule: 出表月份取数据月份", payload.get("month") == "2026-03",
+               f"month={payload.get('month')}")
+        record("month rule: 文件名不一致有说明", bool(payload.get("month_note")),
+               str(payload.get("month_note"))[:200])
+        names = [item.get("file", "") for item in outputs]
+        record("month rule: 文件按数据月份命名", all(n.startswith("3月_04_") for n in names),
+               "、".join(names))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 3 月的数据，参数写 4 月：数据没更新，必须停下
+        _, payload = run_phase(
+            "--phase", "profit", "--month", "2026-04",
+            "--workspace", str(MARCH), "--output-dir", tmp, expect_code=2,
+        )
+        record("month rule: 数据比目标月旧时停下", payload.get("ok") is False,
+               str(payload)[:300])
+        record("month rule: 停下原因是月份不符",
+               payload.get("status") == "month_mismatch", str(payload.get("status")))
+        record("month rule: 停下时不出表", not payload.get("outputs"),
+               str(payload.get("outputs"))[:200])
+
+
 def check_pricing() -> None:
     """价格表单元格已含系数：运价=所在档位单元格，标准价=系数1.0档价格。"""
     sys.path.insert(0, str(SKILL / "scripts"))
@@ -931,6 +967,7 @@ def main() -> int:
     check_list()
     check_inspect()
     check_profit()
+    check_profit_month_rule()
     check_pricing()
     check_publish()
     check_package()

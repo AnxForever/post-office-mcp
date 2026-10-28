@@ -23,6 +23,10 @@ runpy.run_path("/workspace/skills/post-office-monthly-reconciliation/scripts/age
   **不要再执行任何脚本，也不要回头跑 detect**（平台会把连续相同的工具结果判为空转并中止任务）。
 - 返回 `ok:false`（`month_mismatch` / `unreadable_base` / `empty_base` / `finance_mismatch`）时，
   把 `message` 原样告诉用户，不要重试、不要换文件硬跑。
+- 月份规则：数据月份比目标月**新**（文件名写错）时照常出表，`month_note` 会说明实际用的是哪个月；
+  数据比目标月**旧**（文件没更新）时停下报 `month_mismatch`。
+- 两张盈亏表都带第二页「问题清单」：未匹配收入的趟次、改判归属的邮路、口径说明（近似匹配、吨位来源、
+  环比为空的原因）。汇报时提一句“问题清单在第二页”，不要只念主表。
 
 ## 先判断任务
 

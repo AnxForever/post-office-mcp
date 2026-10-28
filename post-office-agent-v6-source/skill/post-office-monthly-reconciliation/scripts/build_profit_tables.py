@@ -306,6 +306,22 @@ def _reclassify_by_finance(trips: list[dict], levels: dict[str, str]) -> list[di
     ]
 
 
+def _adopt_base_month(diag: dict, year: int, month: int) -> str | None:
+    """数据月份比目标月新时，按数据出表，返回该月份；否则返回 None。
+
+    文件名定的是「要出哪个月的账」，数据才是「实际给到的月份」。两者不一致时不能一刀切：
+      - 数据比目标月**新**：多半是文件名写错（把 9 月的数据存成了 8月的名字），按数据走；
+      - 数据比目标月**旧**：数据没更新，必须停下（交给 _base_guard 报 month_mismatch），
+        否则会出一张月份错的表，而且看起来一切正常。
+    跨两个月的数据不猜，也不放行。
+    """
+    months = sorted(diag.get("months") or {})
+    target = f"{year:04d}-{month:02d}"
+    if len(months) != 1:
+        return None
+    return months[0] if months[0] > target else None
+
+
 def _base_guard(diag: dict, year: int, month: int) -> dict | None:
     """核对基础报表原版：读不出来、整张为空、或月份对不上，都必须硬失败。
 
@@ -831,7 +847,107 @@ def _tier_order(tonnage: str) -> tuple[float, int]:
     return (base, 1 if str(tonnage).endswith("B") else 0)
 
 
-def _write(level, labels, route_order, base, income, out_path, year, month, tonnage_map):
+def _mmdd_text(mmdd) -> str:
+    """0909 -> 9月9日。财务表/基础报表里的流水号是 MMDD。"""
+    text = str(mmdd or "").strip()
+    if len(text) == 4 and text.isdigit():
+        return f"{int(text[:2])}月{int(text[2:])}日"
+    return text
+
+
+def _write_issue_sheet(workbook, level, year, month, issues: dict) -> None:
+    """第二页「问题清单」：主表一个字不动，需要人工确认的地方集中放这里。
+
+    主表要跟官方模板逐格对照，任何多余的行列都会造成误判；所以问题一律放第二页。
+    """
+    sheet = workbook.create_sheet("问题清单")
+    sheet.sheet_view.zoomScale = 85
+
+    title = sheet.cell(1, 1, f"{year}年{month}月{level}盈亏表 · 问题清单")
+    title.font = Font(name="宋体", bold=True, size=14)
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
+    hint = sheet.cell(2, 1, "主表口径不变；本页只列出需要人工确认的地方。")
+    hint.font = Font(name="宋体", size=9, color="595959")
+    sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=5)
+
+    row = 4
+
+    def section(caption: str) -> None:
+        nonlocal row
+        cell = sheet.cell(row, 1, caption)
+        cell.font = Font(name="宋体", bold=True, size=11)
+        row += 1
+
+    def table(headers, body) -> None:
+        nonlocal row
+        for col, text in enumerate(headers, 1):
+            cell = sheet.cell(row, col, text)
+            cell.font = Font(name="宋体", bold=True, size=9)
+            cell.border = BORDER
+        row += 1
+        if not body:
+            cell = sheet.cell(row, 1, "无")
+            cell.font = Font(name="宋体", size=9)
+            row += 2
+            return
+        for item in body:
+            for col, value in enumerate(item, 1):
+                cell = sheet.cell(row, col, value)
+                cell.font = Font(name="宋体", size=9)
+                cell.border = BORDER
+            row += 1
+        row += 1
+
+    def note(text: str) -> None:
+        nonlocal row
+        cell = sheet.cell(row, 1, text)
+        cell.font = Font(name="宋体", size=9)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+        sheet.row_dimensions[row].height = 30
+        row += 1
+
+    section("一、结算收入未匹配（未做估算补足，收入按 0 计）")
+    table(
+        ["邮路名称", "吨位", "车牌号", "日期", "运费（元）"],
+        [[f"西安-{t['route'].split('-')[-1]}" if t["route"].startswith("西安-") else t["route"],
+          t["tonnage"], t["plate"], _mmdd_text(t["mmdd"]), round(t["freight"], 2)]
+         for t in issues.get("unmatched", [])],
+    )
+
+    section("二、按财务收入表改判归属的邮路")
+    moved = [i for i in issues.get("reclassified", []) if level in (i.get("from"), i.get("to"))]
+    table(
+        ["邮路名称", "原归属", "现归属", "趟次", "运费（元）"],
+        [[i["route"], i["from"], i["to"], i["trips"], round(i["freight"], 2)] for i in moved],
+    )
+
+    section("三、口径说明")
+    stats = issues.get("stats") or {}
+    if stats:
+        note(f"结算收入逐趟配对：完全一致 {stats.get('exact', 0)} 趟、"
+             f"近似匹配 {stats.get('near', 0)} 趟、未匹配 {stats.get('miss', 0)} 趟。")
+        if stats.get("near"):
+            note("近似匹配按车牌＋相邻日期配对，属分档口径差异；本表不宜宣称与官方逐分完全一致，"
+                 "建议对近似匹配部分抽查后再上报。")
+        if stats.get("miss"):
+            note("未匹配的趟次没有做估算补足，对应收入按 0 计，需人工核对后在主表外备注。")
+    if issues.get("tonnage_source"):
+        note(f"吨位来源：{issues['tonnage_source']}")
+    reverse = issues.get("reverse_income") or {}
+    if reverse:
+        detail = "、".join(f"{route} {amount:,.2f} 元" for route, amount in sorted(reverse.items()))
+        note(f"反向路线（银川-西安 等）不参与逐趟配对，收入已并入对应正向路线：{detail}。")
+    if issues.get("month_note"):
+        note(issues["month_note"])
+    note("未提供上月盈亏表，主表底部环比区留空，未做任何推测。")
+
+    for col, width in zip(range(1, 6), (24, 14, 14, 16, 16)):
+        sheet.column_dimensions[get_column_letter(col)].width = width
+
+
+def _write(level, labels, route_order, base, income, out_path, year, month, tonnage_map,
+           issues: dict | None = None):
     row_count = len(route_order)
     group_count = len(labels)
     summary_start = 2 + group_count * 7
@@ -975,6 +1091,9 @@ def _write(level, labels, route_order, base, income, out_path, year, month, tonn
     for r in range(4, total_row):
         sheet.row_dimensions[r].height = 18
 
+    if issues:
+        _write_issue_sheet(workbook, level, year, month, issues)
+
     workbook.save(out_path)
     workbook.close()
     return totals
@@ -1042,6 +1161,15 @@ def main(argv=None) -> int:
         args.out = fallback
 
     base, trips, diag = _read_summary_sheets(args.base)
+    # 数据月份比目标月新 -> 按数据出表；比目标月旧 -> 下面 _base_guard 会拦下来。
+    month_note = ""
+    adopted = _adopt_base_month(diag, year, month)
+    if adopted:
+        month_note = (f"文件/参数写的是 {args.month}，但基础报表原版的业务日期是 {adopted}，"
+                      "已按数据出表（文件名疑似写错）")
+        print(f"[WARN] {month_note}")
+        year, month = map(int, adopted.split("-"))
+        args.month = adopted
     guard = _base_guard(diag, year, month)
     if guard:
         print(f"[STOP] 基础报表原版不可用于 {args.month}：{guard.get('message', '')}")
@@ -1104,6 +1232,9 @@ def main(argv=None) -> int:
 
     derived = [s for s, d in diag.items()
                if isinstance(d, dict) and d.get("tonnage_source") == "容间推导"]
+    tonnage_source = ("基础报表原版（一干汇总/二干基础）的吨位列"
+                      + (f"；{'、'.join(derived)}没有吨位列，按价格表容积下限推导"
+                         if derived else ""))
     deliverables: list[dict] = []
     for level, filename in (("一干", "一干委办盈亏.xlsx"), ("二干", "二干委办盈亏.xlsx")):
         template_labels: list[str] = []
@@ -1136,7 +1267,16 @@ def main(argv=None) -> int:
         scoped_income = {(route, ton): value for (lvl, route, ton), value in income.items() if lvl == level}
 
         out_path = args.out / f"{month}月_04_{level}盈亏表.xlsx"
-        totals = _write(level, labels, route_order, scoped_base, scoped_income, out_path, year, month, tonnage_map)
+        issues = {
+            "unmatched": [t for t in misses if t.get("level") == level],
+            "reclassified": reclassified,
+            "stats": stats,
+            "tonnage_source": tonnage_source,
+            "reverse_income": reverse_income,
+            "month_note": month_note,
+        }
+        totals = _write(level, labels, route_order, scoped_base, scoped_income, out_path,
+                        year, month, tonnage_map, issues=issues)
         deliverables.append({
             "level": level,
             "file": out_path.name,
@@ -1159,15 +1299,14 @@ def main(argv=None) -> int:
         "ok": True,
         "status": "profit_completed",
         "month": args.month,
+        "month_note": month_note,
         "detail_rows": len(trips),
         "income_match": stats,
         "unmatched": len(misses),
         "published": published,
         "outputs": deliverables,
         "next_action": "已出表并发布，直接汇报，不要再执行本脚本或重新 detect。",
-        "tonnage_source": "基础报表原版（一干汇总/二干基础）的吨位列"
-                          + (f"；{'、'.join(derived)} 没有吨位列，按价格表容积下限推导"
-                             if derived else ""),
+        "tonnage_source": tonnage_source,
         "level_source": "一/二干以财务收入表的邮路级别为准，基础报表 sheet 名兜底",
         "level_reclassified": [
             {"route": item["route"], "from": item["from"], "to": item["to"],
@@ -1180,6 +1319,8 @@ def main(argv=None) -> int:
     names = "、".join(item["file"] for item in deliverables)
     scale = "，".join(f"{item['level']} {item['total_trips']} 趟" for item in deliverables)
     print(f"[OK] 已出表并发布：{names}（{scale}）。直接汇报，不要重跑本脚本或 detect。")
+    if month_note:
+        print(f"[NOTE] {month_note}")
     print(json.dumps(report, ensure_ascii=False))
     return 0
 
