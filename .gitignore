@@ -19,3 +19,7 @@ post-office-agent-v6-source/skill.zip
 # 本地工具配置
 .aionrs/
 .spec-workflow/
+.agents/
+.claude/
+.playwright-mcp/
+skills-lock.json
