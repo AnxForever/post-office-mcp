@@ -114,41 +114,30 @@ def _column(header, *names):
     return None
 
 
-# 「容间 → 吨位档」：直接取两张价格表写明的容积下限，不自己拟阈值。
-# 二干价格表第 4 行：3吨≥16、5吨≥35、8吨≥45、12吨≥55、20吨≥100、
-#                   30吨≥130、40A≥150、40B≥180（m³）
-# 一干价格表表头同样标注：5吨≥35、8吨≥45、12吨≥55，20/30/40 与二干同一条线。
-# 这也与 assets/route-supplement.json 记的官方专线定档一致
-# （兰州 127 方→20 吨、130~143 方→30 吨、153 方以上→40A）。
-_TIER_LINES = (
-    (180, "40B"),
-    (150, "40A"),
-    (130, "30"),
-    (100, "20"),
-    (55, "12"),
-    (45, "8"),
-    (35, "5"),
-    (16, "3"),
+# 「容间 → 表头档位」：客户 2026-10 手写确认的区间，原样照用，不自己拟阈值。
+#   小于55 / [55,100) / [100,130) / [130,150) / [150,180) / 大于180
+# 客户原话：生成盈亏表时没有吨位就按容积来划分。
+VOLUME_BINS = (
+    (180, "大于180"),
+    (150, "[150,180)"),
+    (130, "[130,150)"),
+    (100, "[100,130)"),
+    (55, "[55,100)"),
+    (0, "小于55"),
 )
+BIN_ORDER = ["小于55", "[55,100)", "[100,130)", "[130,150)", "[150,180)", "大于180"]
 
 
-def _tier_from_volume(volume, level: str) -> str:
-    """容间 -> 车型档。只有基础报表没有「吨位」列时才用（有吨位列一律用吨位列）。
-
-    区间就是价格表的容积下限；一干干线车最低按 12 吨计（8/5/2.75 吨只出现在
-    一干价格表的低价系数列，盈亏表历史口径里一干从未出现这些档）。
-    """
+def _bin_of(volume) -> str:
+    """容间（m³）-> 表头档位名。180 整按「大于180」处理。"""
     try:
         value = float(volume)
     except (TypeError, ValueError):
         return ""
-    floor = "12" if level == "一干" else "3"
-    for lower, tier in _TIER_LINES:
+    for lower, label in VOLUME_BINS:
         if value >= lower:
-            if level == "一干" and tier in {"3", "5", "8"}:
-                return floor
-            return tier
-    return floor
+            return label
+    return "小于55"
 
 
 def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
@@ -190,8 +179,8 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
             c_price = _column(rows[0], "运价")
             c_plate = _column(rows[0], "车牌号")
             missing = []
-            if c_ton is None and c_vol is None:
-                missing.append("吨位/容间")
+            if c_vol is None:
+                missing.append("容间")
             if c_qty is None:
                 missing.append("运输量/邮运量")
             if c_time is None:
@@ -204,12 +193,10 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
                 diag[sheet] = {
                     "status": "unreadable",
                     "missing_headers": missing,
-                    # 车管平台汇总导出：一干按「系数 × 基准运价」计价，不记吨位档
-                    "coefficient_export": c_ton is None and _column(rows[0], "系数") is not None,
+                    "has_tonnage_column": c_ton is not None,
                     "headers": [str(v).strip() for v in rows[0] if str(v or "").strip()],
                 }
                 continue
-            from_volume = c_ton is None
             route_col = _route_column(rows[0], idx)
             remark_col = idx.get("备注")
             parsed = 0
@@ -218,8 +205,8 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
                 if not (row and isinstance(row[0], int)):
                     continue
                 route = normalize_route(row[route_col])
-                tonnage = (str(row[c_ton] or "").strip() if not from_volume
-                           else _tier_from_volume(row[c_vol], level))
+                # 分档只用容间（客户 2026-10 书面口径）：吨位列即使存在也不参与分组。
+                tonnage = _bin_of(row[c_vol])
                 if not route or not tonnage:
                     no_tier += 1 if route else 0
                     continue
@@ -239,22 +226,13 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
                 parsed += 1
             diag[sheet] = {
                 "status": "ok", "rows": len(rows) - 1, "parsed": parsed,
-                "tonnage_source": "容间推导" if from_volume else "吨位列",
+                "tier_source": "容间分档",
             }
             if no_tier:
-                diag[sheet]["rows_without_tonnage"] = no_tier
+                diag[sheet]["rows_without_bin"] = no_tier
     finally:
         workbook.close()
     diag["months"] = {f"{y:04d}-{m:02d}": n for (y, m), n in sorted(months.items())}
-
-    # 结算吨位：备注优先，否则该车该路线最低档
-    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
-    for trip in trips:
-        grouped[(trip["level"], trip["route"], trip["plate"])].append(trip)
-    for group in grouped.values():
-        lowest = min(group, key=lambda x: _tier_order(x["tonnage"]))["tonnage"]
-        for trip in group:
-            trip["tonnage"] = _remark_tier(trip["remark"]) or lowest
 
     return _aggregate_base(trips), trips, diag
 
@@ -339,15 +317,6 @@ def _base_guard(diag: dict, year: int, month: int) -> dict | None:
     unusable = {s: d for s, d in diag.items()
                 if s in ("一干汇总", "二干基础") and d.get("status") == "unreadable"}
     if unusable:
-        coefficient = [s for s, d in unusable.items() if d.get("coefficient_export")]
-        if coefficient:
-            return {
-                "status": "need_official_base",
-                "message": f"基础报表原版的 {'、'.join(coefficient)} 是车管平台汇总导出："
-                           f"只有「系数」计价，没有「吨位」列，无法拆成 12/20/30 吨车型档。",
-                "next_action": "请上传官方格式的基础报表原版（像上个月那样，一干汇总里带「吨位」列），"
-                               "车管平台汇总的版本不能用来做一干盈亏表。",
-            }
         detail = "；".join(
             f"{sheet} 缺少列 {d['missing_headers']}（实际表头：{'、'.join(d['headers'])}）"
             for sheet, d in unusable.items()
@@ -517,58 +486,11 @@ def allocate_income(trips: list[dict], exact: dict, by_plate: dict, year: int, m
 
 
 def _tier_number(label: str) -> float | None:
-    """吨位档标签 -> 数值。40A/40（40A）都是 40；40B 也记作 40，靠标签区分。"""
-    if label.startswith("40（"):
-        return 40.0
-    if label == "40A":
-        return 40.0
-    if label == "40B":
-        return 40.0  # 与 40A 同数值，靠标签区分
-    match = re.search(r"\d+(?:\.\d+)?", label)
-    return float(match.group(0)) if match else None
-
-
-def map_tonnage(tonnage: str, labels: list[str]) -> str | None:
-    """把基础报表的吨位值落到模板的吨位档。
-
-    规则（按优先级）：
-      1. 标签同名，直接命中（40A / 40B / 2.75 …）。
-      2. 带字母的档（40A/40B）优先同字母档，否则取同数值的非 B 档。
-      3. 其余按「对数距离最近的档」归并：档位本质是车型/容积分档，价格表调整时
-         档位数值会变（如二干最小档 2.75 吨 → 3 吨，8 月实际数据是 3），
-         同一档只是换了名字，按比例距离归并才不会把 3 吨错抬到 12 吨档。
-    """
-    tonnage = str(tonnage).strip()
-    if tonnage in labels:
-        return tonnage
-
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([AB])?", tonnage)
-    if not match:
+    """档位名 -> 排序用的下界。档位就是客户给的容积区间。"""
+    try:
+        return float(BIN_ORDER.index(str(label).strip()))
+    except ValueError:
         return None
-    value = float(match.group(1))
-    suffix = (match.group(2) or "").upper()
-    numeric = [(label, _tier_number(label)) for label in labels]
-    numeric = [(label, number) for label, number in numeric if number]
-    if not numeric:
-        return None
-
-    if suffix:
-        # 模板有同字母档就用同字母档；没有则回落到 40A 档（官方把裸 40 计在 40A）
-        for label, number in numeric:
-            if abs(number - value) < 1e-9 and (label.endswith(suffix) or f"（40{suffix}）" in label):
-                return label
-        for label, number in numeric:
-            if abs(number - value) < 1e-9:
-                return label
-
-    exact = [label for label, number in numeric if abs(number - value) < 1e-9]
-    if exact:
-        return exact[0]
-
-    if value <= 0:
-        return min(numeric, key=lambda item: item[1])[0]
-    # 对数距离：等价于按比例找最近的档位
-    return min(numeric, key=lambda item: abs(math.log(value / item[1])))[0]
 
 
 def _template_layout(path: Path):
@@ -600,84 +522,41 @@ def _template_layout(path: Path):
 
 
 def _ordered_tiers(trips: list[dict], level: str, template_labels: list[str]) -> list[str]:
-    """当月实际出现的吨位档，按数值升序。
-
-    吨位档以源数据为准：模板只是历史版式，价格表调档后模板名会过期
-    （如二干最小档 2.75 吨 -> 3 吨）。这里完全由当月数据决定，
-    template_labels 只在完全不传模板时用来兜底。
-    """
+    """当月实际出现的容积区间，按区间从低到高排序。"""
     seen: set[str] = set()
     for trip in trips:
         if trip["level"] == level:
             seen.add(trip["tonnage"])
     if not seen:
         return list(template_labels)
-
-    def sort_key(label: str):
-        if label.endswith("B"):
-            return (40.0, 1)
-        number = _tier_number(label)
-        return (number if number is not None else 999, 0)
-
-    return sorted(seen, key=sort_key)
+    return sorted(seen, key=lambda label: BIN_ORDER.index(label)
+                  if label in BIN_ORDER else len(BIN_ORDER))
 
 
 def _tier_alias(label: str) -> str:
-    """把吨位值归到「档位键」：40A / 40 / 40（40A）视为同一个 40 吨档。
-
-    官方口径：一干 40A 与 40B 分列；二干的裸 40 与 40A 合并成一组「40（40A）」。
-    这里统一用 40A 作为 40 吨档的键，40B 单独成档。
-    """
-    text = str(label).strip()
-    if text.endswith("B"):
-        return "40B"
-    if text.startswith("40"):
-        return "40A"
-    return text
+    """档位键就是区间名本身，没有别名归并。"""
+    return str(label).strip()
 
 
 def _merge_tiers(trips: list[dict], level: str,
                  extra_tonnages: Iterable[str] = ()) -> tuple[list[str], dict[str, list[str]]]:
-    """按官方口径归并吨位档，返回（档位显示名列表, {档位键: [原始吨位值...]}）。
+    """返回（当月出现的区间名列表, {区间名: [区间名]}）。
 
-    显示名规则：一干 40A 显示 40A；二干 40 与 40A 合并后显示「40（40A）」。
-    最小档沿用当月实际值（价格表调档后自然变成 3 等）。
-
-    extra_tonnages：备注里出现、但基础报表当列没有的吨位档（如全部 40B 记录
-    都按 30 吨结算），也要建列，否则这部分收入会被漏掉。
+    档位完全由客户给的容积区间决定，不再按吨位归并或改名。
+    extra_tonnages 保留参数位：收入里有、基础报表当列没有的区间也要建列。
     """
     values: dict[str, list[str]] = {}
     for trip in trips:
         if trip["level"] != level:
             continue
         key = _tier_alias(trip["tonnage"])
-        values.setdefault(key, [])
-        if trip["tonnage"] not in values[key]:
-            values[key].append(trip["tonnage"])
+        values.setdefault(key, [key])
     for tonnage in extra_tonnages:
-        key = _tier_alias(str(tonnage))
-        values.setdefault(key, [])
-        if str(tonnage) not in values[key]:
-            values[key].append(str(tonnage))
+        values.setdefault(_tier_alias(str(tonnage)), [str(tonnage)])
 
-    def sort_key(key: str):
-        if key == "40B":
-            return (40.0, 1)
-        if key == "40A":
-            return (40.0, 0)
-        number = _tier_number(key)
-        return (number if number is not None else 999, 0)
-
-    keys = sorted(values, key=sort_key)
-    labels = []
-    for key in keys:
-        if key != "40A":
-            labels.append(key)
-            continue
-        # 40 吨档显示名：二干沿用官方的「40（40A）」（裸 40 与 40A 是同一档，
-        # 当月只出现其中一个时也保持这个显示名）；一干直接写 40A。
-        labels.append("40（40A）" if level == "二干" else "40A")
-    return labels, {key: sorted(values[key]) for key in keys}
+    keys = sorted(values, key=lambda label: BIN_ORDER.index(label)
+                  if label in BIN_ORDER else len(BIN_ORDER))
+    return keys, {key: values[key] for key in keys}
 
 
 def _ordered_routes(trips: list[dict], level: str, template_routes: list[str]) -> list[str]:
@@ -705,15 +584,7 @@ def _apply_route_style(route: str, with_prefix: bool) -> str:
 
 
 def _header_label(label: str, tonnage_map: dict[str, list[str]]) -> str:
-    """表头显示当月实际吨位档名。
-
-    价格表调档时（如二干最小档 2.75 吨 -> 3 吨），模板标签仍是旧名，
-    但这一档实际收的是新吨位，表头应显示新名，避免和实际数据对不上。
-    只有「该档唯一对应一个不同吨位」时才改名，40（40A）这类字母档保持原样。
-    """
-    tons = tonnage_map.get(label) or []
-    if len(tons) == 1 and tons[0] != label and not any(ch.isalpha() for ch in label):
-        return tons[0]
+    """表头直接写客户给的容积区间名，不再按吨位改名。"""
     return label
 
 
@@ -909,7 +780,7 @@ def _write_issue_sheet(workbook, level, year, month, issues: dict) -> None:
 
     section("一、结算收入未匹配（未做估算补足，收入按 0 计）")
     table(
-        ["邮路名称", "吨位", "车牌号", "日期", "运费（元）"],
+        ["邮路名称", "容积区间", "车牌号", "日期", "运费（元）"],
         [[f"西安-{t['route'].split('-')[-1]}" if t["route"].startswith("西安-") else t["route"],
           t["tonnage"], t["plate"], _mmdd_text(t["mmdd"]), round(t["freight"], 2)]
          for t in issues.get("unmatched", [])],
@@ -932,8 +803,8 @@ def _write_issue_sheet(workbook, level, year, month, issues: dict) -> None:
                  "建议对近似匹配部分抽查后再上报。")
         if stats.get("miss"):
             note("未匹配的趟次没有做估算补足，对应收入按 0 计，需人工核对后在主表外备注。")
-    if issues.get("tonnage_source"):
-        note(f"吨位来源：{issues['tonnage_source']}")
+    if issues.get("tier_source"):
+        note(f"分档口径：{issues['tier_source']}")
     reverse = issues.get("reverse_income") or {}
     if reverse:
         detail = "、".join(f"{route} {amount:,.2f} 元" for route, amount in sorted(reverse.items()))
@@ -1230,11 +1101,8 @@ def main(argv=None) -> int:
             bucket = sorted({k for r, k in candidates if r == top})[-1]
             income[(lvl, route, bucket)] += float(entry["net"])
 
-    derived = [s for s, d in diag.items()
-               if isinstance(d, dict) and d.get("tonnage_source") == "容间推导"]
-    tonnage_source = ("基础报表原版（一干汇总/二干基础）的吨位列"
-                      + (f"；{'、'.join(derived)}没有吨位列，按价格表容积下限推导"
-                         if derived else ""))
+    tonnage_source = ("基础报表原版（一干汇总/二干基础）的「容间」列，"
+                      "按 小于55 / [55,100) / [100,130) / [130,150) / [150,180) / 大于180 分档")
     deliverables: list[dict] = []
     for level, filename in (("一干", "一干委办盈亏.xlsx"), ("二干", "二干委办盈亏.xlsx")):
         template_labels: list[str] = []
@@ -1271,7 +1139,7 @@ def main(argv=None) -> int:
             "unmatched": [t for t in misses if t.get("level") == level],
             "reclassified": reclassified,
             "stats": stats,
-            "tonnage_source": tonnage_source,
+            "tier_source": tonnage_source,
             "reverse_income": reverse_income,
             "month_note": month_note,
         }
@@ -1282,8 +1150,8 @@ def main(argv=None) -> int:
             "file": out_path.name,
             "total_trips": sum(bucket[0] for bucket in totals.values()),
             "routes": len(route_order),
-            "tonnage_groups": labels,
-            "tonnage_merge": merged,
+            "volume_groups": labels,
+            "bin_merge": merged,
             "template": template_status,
         })
 
@@ -1306,7 +1174,7 @@ def main(argv=None) -> int:
         "published": published,
         "outputs": deliverables,
         "next_action": "已出表并发布，直接汇报，不要再执行本脚本或重新 detect。",
-        "tonnage_source": tonnage_source,
+        "tier_source": tonnage_source,
         "level_source": "一/二干以财务收入表的邮路级别为准，基础报表 sheet 名兜底",
         "level_reclassified": [
             {"route": item["route"], "from": item["from"], "to": item["to"],
