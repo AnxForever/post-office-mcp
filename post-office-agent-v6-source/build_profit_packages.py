@@ -5,7 +5,7 @@
 
 产物（项目根目录）：
     post-office-profit-report-skill.zip      技能包，POST /api/skills/upload
-    邮局一干二干盈亏表V1.0-agent.zip          专家包，控制台「发布专家」
+    邮局一干二干盈亏表V1.1-agent.zip          专家包，控制台「发布专家」
 """
 from __future__ import annotations
 

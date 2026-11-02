@@ -1,8 +1,8 @@
 {
   "name": "post-office-profit-report",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "bound",
-  "description": "邮局一干/二干盈亏表专用技能：只用基础报表原版和财务收入表，按容间区间分档",
+  "description": "邮局一干/二干盈亏表专用技能：只用基础报表原版和财务收入表，看基础报表给了什么：有吨位按吨位（备注优先），没有才按容间区间分档",
   "scripts": {
     "agentos_entrypoint": {
       "file": "scripts/agentos_entrypoint.py",
@@ -12,7 +12,7 @@
     "build_profit_tables": {
       "file": "scripts/build_profit_tables.py",
       "language": "python",
-      "description": "按容间区间分档生成一干/二干盈亏表（含第二页问题清单）"
+      "description": "按数据实际带的吨位/容间分档生成一干/二干盈亏表（含第二页问题清单）"
     }
   }
 }

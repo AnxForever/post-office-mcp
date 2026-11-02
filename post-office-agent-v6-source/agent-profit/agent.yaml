@@ -1,6 +1,6 @@
-name: "邮局一干二干盈亏表 V1.0"
-description: "只上传基础报表原版和财务收入表，按容间区间生成一干、二干两张盈亏表"
-version: "1.0.0"
+name: "邮局一干二干盈亏表 V1.1"
+description: "只上传基础报表原版和财务收入表，看报表给了什么：有吨位按吨位（备注优先），没有按容间区间，生成两张盈亏表"
+version: "1.1.0"
 type: "general"
 skills:
   - "post-office-profit-report"

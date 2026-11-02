@@ -1,6 +1,6 @@
 name: "邮局月度委办运输报表核对 V6.3"
 description: "按表结构识别输入文件，通过受控 Skill 执行月度预检、人工核对和报表交付；只要盈亏表时走专用盈亏技能"
-version: "6.5.0"
+version: "6.6.0"
 type: "general"
 skills:
   - "post-office-monthly-reconciliation"
