@@ -554,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         "issues": dict(issue_counts),
         "warnings": warnings,
         "sha256": file_sha256(output),
-        "next_action": "请人工打开 02 初版核对颜色行和「问题汇总」，修订后再跑拆分技能",
+        "next_action": "请人工打开 02 初版，先看「问题总结」再核对颜色行，修订后再跑拆分技能",
     })
 
 

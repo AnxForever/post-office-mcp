@@ -1,8 +1,8 @@
 {
   "name": "post-office-draft-report",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "bound",
-  "description": "邮局基础报表初版专用技能：用上一阶段的车型汇总表 + 车管派车记录，生成 21 列初版（含问题汇总和拆分元数据），出表后停下等人工核对",
+  "description": "邮局基础报表初版专用技能：用上一阶段的车型汇总表 + 车管派车记录，生成 21 列初版（含问题总结、问题汇总和拆分元数据），出表后停下等人工核对",
   "scripts": {
     "agentos_entrypoint": {
       "file": "scripts/agentos_entrypoint.py",

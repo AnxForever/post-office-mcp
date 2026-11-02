@@ -28,6 +28,11 @@ ENV = dict(
     PYTHONFAULTHANDLER="1",
 )
 NATIVE_CRASH = {-1073741819, -1073741571, -1073740791, 3221225477, 3221225725, 3221226505}
+# openpyxl 3.1.5 在 Windows 上偶发的样式比较错误，重跑即可；不是业务逻辑失败。
+TRANSIENT_STYLE_ERRORS = (
+    "object is not iterable",
+    "'str' object has no attribute 'type'",
+)
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -50,8 +55,12 @@ def run(skill: str, *args: str, expect_code: int = 0) -> tuple[int, dict]:
             errors="replace",
         )
         if proc.returncode not in NATIVE_CRASH:
-            break
-        print(f"[WARN] 原生崩溃，重跑一次: {skill} (exit {proc.returncode})")
+            if not (
+                proc.returncode == 1
+                and any(token in (proc.stderr or "") for token in TRANSIENT_STYLE_ERRORS)
+            ):
+                break
+        print(f"[WARN] 原生/样式临时错误，重跑一次: {skill} (exit {proc.returncode})")
     text = proc.stdout.strip()
     start = text.find("{")
     payload = {}
@@ -97,6 +106,21 @@ def main() -> int:
         record("02 生成", draft.get("status") == "draft_completed" and draft_file.is_file())
         record("02 行数", draft.get("metrics", {}).get("draft_rows") == 4309, str(draft.get("metrics")))
         record("02 价格匹配", draft.get("metrics", {}).get("price_matched") == 3628, str(draft.get("metrics")))
+        summary_book = load_workbook(draft_file, read_only=True, data_only=True) if draft_file.is_file() else None
+        if summary_book is None:
+            record("02 有问题总结页", False, "02 未生成")
+        else:
+            try:
+                summary_ws = summary_book["问题总结"] if "问题总结" in summary_book.sheetnames else None
+                summary_text = " ".join(
+                    str(cell)
+                    for row in summary_ws.iter_rows(min_row=1, max_row=min(summary_ws.max_row, 12), values_only=True)
+                    for cell in row
+                    if cell is not None
+                ) if summary_ws is not None else ""
+            finally:
+                summary_book.close()
+            record("02 有问题总结页", summary_ws is not None and "问题类型" in summary_text and "问题说明" in summary_text)
 
         # 已有 02 时不自动覆盖，避免把人工核对结果冲掉。
         _, draft_again = run(

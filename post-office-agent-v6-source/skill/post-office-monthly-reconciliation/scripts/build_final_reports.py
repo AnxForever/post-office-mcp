@@ -136,11 +136,18 @@ def read_corrected_review(path: Path | str, state: dict[str, Any]) -> tuple[list
     errors: list[str] = []
     try:
         current = ["结构发现", "问题汇总", "基础报表"]
+        with_summary = ["结构发现", "问题汇总", "问题总结", "基础报表"]
         legacy = ["问题汇总", "基础报表"]
-        has_current_prefix = wb.sheetnames[:len(current)] == current
+        has_current_prefix = any(
+            wb.sheetnames[:len(prefix)] == prefix
+            for prefix in (with_summary, current)
+        )
         has_legacy_prefix = wb.sheetnames[:len(legacy)] == legacy
         if not (has_current_prefix or has_legacy_prefix):
-            required = set(current) if "结构发现" in wb.sheetnames else set(legacy)
+            if "结构发现" in wb.sheetnames:
+                required = set(with_summary)
+            else:
+                required = set(legacy)
             if required.issubset(wb.sheetnames):
                 raise ValueError("修订初版工作表顺序不正确")
             raise ValueError("修订初版必须包含问题汇总和基础报表，可包含结构发现")

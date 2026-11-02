@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from copy import copy
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -33,6 +34,107 @@ SEVERITY_FILL = {
     "blue": PatternFill("solid", fgColor="FFBDD7EE"),
     "deep_orange": PatternFill("solid", fgColor="FFC65911"),
 }
+SEVERITY_LABELS = {
+    "red": "必须处理",
+    "deep_orange": "降吨位待核对",
+    "orange": "需要核对",
+    "yellow": "提醒",
+    "blue": "容间兜底",
+}
+SEVERITY_ORDER = {"red": 0, "deep_orange": 1, "orange": 2, "yellow": 3, "blue": 4}
+# 问题类型 -> (客户看得懂的名称, 问题说明, 建议处理)
+ISSUE_GUIDE = {
+    "model_summary_missing": (
+        "车型/容间未匹配",
+        "车管有这趟派车，但在线测量表里找不到同一天、同一车牌，容间和吨位无法自动带出。",
+        "核对该日期和车牌的测量记录，或人工补容间、吨位。",
+    ),
+    "vehicle_dispatch_missing": (
+        "在线有测量、车管无派车",
+        "在线测量表有这辆车，但车管派车明细里没有对应趟次，可能是漏录派车单或临时加车。",
+        "核对是否漏录派车单；如是加车或临调，人工补行信息。",
+    ),
+    "online_missing": (
+        "在线测量表未找到车辆",
+        "这趟车在在线测量表里没有记录。",
+        "核实车牌和挂车，人工补充容间。",
+    ),
+    "online_unmeasured": (
+        "在线记录未测量",
+        "在线表确认这辆车没有测量，容间为 0、长宽高为空。",
+        "确认是否保持 0；实际有容间时人工补填。",
+    ),
+    "online_zero_inconsistent": (
+        "在线零值与尺寸不一致",
+        "在线容间填 0，但长宽高有值，两者对不上。",
+        "回查原始测量表，确认正确容间。",
+    ),
+    "volume_cross_date": (
+        "容间借用其他日期",
+        "当天没有测到，用了同车牌其他日期的测量值，不是本趟实测。",
+        "确认车型一致；不一致时人工改填容间。",
+    ),
+    "volume_platform_vs_measured": (
+        "平台容间与实测差得多",
+        "车管平台容间和在线实测相差较大，当前按平台值计算。",
+        "人工确认哪个容间正确。",
+    ),
+    "volume_from_measured": (
+        "平台无容间，改用实测",
+        "车管平台没有提供容间，已改用在线测量表容积。",
+        "人工确认容间。",
+    ),
+    "official_volume_diff": (
+        "容间与官方报表不一致",
+        "本表容间和客户官方基础报表对不上。",
+        "核对车辆实测容间。",
+    ),
+    "official_price_diff": (
+        "运价与官方报表不一致",
+        "本表运价和客户官方基础报表对不上。",
+        "核对价格表档位或封顶规则。",
+    ),
+    "cross_tonnage": (
+        "吨位与同车常跑档位不一致",
+        "同一辆车本月多数趟次是一个吨位档，这几趟不同，可能跨档。",
+        "确认是否临时换车型或调度安排。",
+    ),
+    "price_route_uncovered": (
+        "价格表未覆盖这条路线",
+        "一干或二干价格表里找不到这条邮路，运价无法自动带出。",
+        "维护路线别名或价格表，也可人工补价。",
+    ),
+    "volume_missing": (
+        "没有容间，判不了吨位",
+        "这趟没有有效容间，无法按合同推算吨位。",
+        "人工补充有效容间。",
+    ),
+    "tonnage_below_minimum": (
+        "容间低于最低吨位档",
+        "容间小于价格表最低档（通常是 55 方），无法自动定价。",
+        "人工确认吨位和价格。",
+    ),
+    "price_missing": (
+        "价格表缺这个吨位的价",
+        "路线能对上，但对应吨位档没有价格。",
+        "维护价格表，或人工补充运价。",
+    ),
+    "settlement_downgrade_candidate": (
+        "疑似降吨位，未自动改价",
+        "车管结算吨位低于车型吨位，需结合调度通知确认是否降档。",
+        "确认调度通知或备注后，决定是否按结算吨位计价。",
+    ),
+    "settlement_tonnage_unmapped": (
+        "结算吨位没有价格档",
+        "车管结算吨位在价格表里找不到可用档位。",
+        "核对结算吨位和价格表档位。",
+    ),
+    "settlement_downgrade": (
+        "已按结算吨位降档",
+        "车管结算吨位低于车型吨位，已按结算吨位重新计价。",
+        "核对降档后的运费和差价。",
+    ),
+}
 
 STRUCTURE_SOURCE_LABELS = {
     "model": "车型表",
@@ -58,6 +160,191 @@ def _route_type_label(price_kind: Any) -> str | None:
 
 def strongest_color(*colors: str | None) -> str | None:
     return max(colors, key=lambda color: COLOR_PRIORITY.get(color, 0), default=None)
+
+
+def _issue_guide(issue: Any) -> tuple[str, str, str]:
+    """把内部问题代码翻成客户看得懂的名称、说明和处理建议。"""
+    code = str(getattr(issue, "code", "") or "")
+    label, explain, advice = ISSUE_GUIDE.get(code, ("", "", ""))
+    if label:
+        return label, explain, advice
+    message = str(getattr(issue, "message", "") or "").strip()
+    return (
+        message[:24] or "其他问题",
+        message or "未分类问题",
+        str(getattr(issue, "action", "") or "").strip() or "人工核对",
+    )
+
+
+def _write_issue_summary(
+    workbook: Workbook,
+    rows: Iterable[Mapping[str, Any]],
+    month: tuple[int, int],
+) -> None:
+    """生成客户先看的「问题总结」页：按问题类型汇总，明细仍在「问题汇总」。"""
+    stats: dict[Any, dict[str, Any]] = {}
+    total_rows = affected_rows = total_issues = 0
+    for row_number, row in enumerate(rows, 1):
+        total_rows += 1
+        issues = list(row.get("issues") or [])
+        if issues:
+            affected_rows += 1
+        for issue in issues:
+            total_issues += 1
+            label, explain, advice = _issue_guide(issue)
+            code = str(getattr(issue, "code", "") or "")
+            key: Any = code if code in ISSUE_GUIDE else (code, label)
+            entry = stats.setdefault(key, {
+                "label": label,
+                "explain": explain,
+                "advice": advice,
+                "severity": None,
+                "rows": set(),
+                "count": 0,
+                "routes": Counter(),
+            })
+            entry["severity"] = strongest_color(entry["severity"], getattr(issue, "severity", None))
+            entry["rows"].add(row_number)
+            entry["count"] += 1
+            route = normalize_text(row.get("route"))
+            if route:
+                entry["routes"][route] += 1
+
+    items: list[dict[str, Any]] = []
+    for entry in stats.values():
+        severity = entry["severity"] or "orange"
+        route_count = len(entry["routes"])
+        routes = "、".join(name for name, _ in entry["routes"].most_common(5))
+        if route_count > 5:
+            routes += f"（共 {route_count} 条邮路）"
+        items.append({
+            "label": entry["label"],
+            "explain": entry["explain"],
+            "advice": entry["advice"],
+            "severity": severity,
+            "rows": len(entry["rows"]),
+            "count": entry["count"],
+            "routes": routes or "—",
+        })
+    items.sort(key=lambda item: (
+        SEVERITY_ORDER.get(item["severity"], 9),
+        -item["rows"],
+        item["label"],
+    ))
+
+    ws = workbook.create_sheet("问题总结", 2)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "FFFFC000"
+    ws.merge_cells("A1:H1")
+    title = ws.cell(1, 1, f"{month[0]}年{month[1]}月 基础报表初版 · 问题总结")
+    title.font = Font(bold=True, size=16, color="FFFFFFFF")
+    title.fill = PatternFill("solid", fgColor="FF1F4E78")
+    title.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells("A2:H2")
+    if total_issues:
+        overview = (
+            f"本月共 {total_rows:,} 行派车记录，其中 {affected_rows:,} 行需要关注，"
+            f"合计 {total_issues:,} 条问题。下面按问题类型汇总，逐行明细见「问题汇总」。"
+        )
+    else:
+        overview = f"本月共 {total_rows:,} 行派车记录，没有发现需要人工处理的问题。"
+    subtitle = ws.cell(2, 1, overview)
+    subtitle.font = Font(size=11, color="FF404040")
+    subtitle.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 36
+
+    headers = ["序号", "严重程度", "问题类型", "涉及行数", "问题条数", "问题说明", "建议处理", "主要涉及邮路"]
+    header_row = 4
+    header_fill = PatternFill("solid", fgColor="FF4472C4")
+    header_font = Font(bold=True, color="FFFFFFFF")
+    thin = Side(style="thin", color="FFBFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for column, value in enumerate(headers, 1):
+        cell = ws.cell(header_row, column, value)
+        cell.fill = copy(header_fill)
+        cell.font = copy(header_font)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = copy(border)
+    ws.row_dimensions[header_row].height = 26
+
+    if items:
+        for index, item in enumerate(items, 1):
+            row = header_row + index
+            values = [
+                index,
+                SEVERITY_LABELS.get(item["severity"], item["severity"]),
+                item["label"],
+                item["rows"],
+                item["count"],
+                item["explain"],
+                item["advice"],
+                item["routes"],
+            ]
+            for column, value in enumerate(values, 1):
+                cell = ws.cell(row, column, value)
+                cell.border = copy(border)
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+            severity_cell = ws.cell(row, 2)
+            if item["severity"] in SEVERITY_FILL:
+                severity_cell.fill = copy(SEVERITY_FILL[item["severity"]])
+            severity_cell.font = Font(
+                bold=True,
+                color="FFFFFFFF" if item["severity"] in {"red", "deep_orange"} else "FF000000",
+            )
+            severity_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[row].height = 44
+        table_end = header_row + len(items)
+    else:
+        table_end = header_row + 1
+        ws.merge_cells(start_row=table_end, start_column=1, end_row=table_end, end_column=8)
+        cell = ws.cell(table_end, 1, "本月没有发现需要人工处理的问题。")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.auto_filter.ref = f"A{header_row}:H{table_end}"
+    ws.freeze_panes = f"A{header_row + 1}"
+    for column, width in enumerate([7, 15, 24, 10, 10, 62, 40, 38], 1):
+        ws.column_dimensions[get_column_letter(column)].width = width
+
+    legend_header = table_end + 2
+    ws.merge_cells(start_row=legend_header, start_column=1, end_row=legend_header, end_column=8)
+    legend_title = ws.cell(legend_header, 1, "颜色说明")
+    legend_title.font = Font(bold=True, size=12, color="FF1F4E78")
+    legend_rows = [
+        ("red", "必须处理：影响计价或关键字段缺失，不处理会得到空价或错价。"),
+        ("deep_orange", "降吨位待核对：车管结算吨位低于车型吨位，已按结算吨位计价，需核对调度通知。"),
+        ("orange", "需要核对：容间、测量口径或官方报表有差异，确认后再出拆分版。"),
+        ("yellow", "提醒：吨位档位可能变化，确认无误可保留。"),
+        ("blue", "容间兜底：容间取自同车牌其他日期，确认车型一致即可。"),
+    ]
+    for offset, (severity, text) in enumerate(legend_rows, 1):
+        row = legend_header + offset
+        color_cell = ws.cell(row, 1, SEVERITY_LABELS.get(severity, severity))
+        if severity in SEVERITY_FILL:
+            color_cell.fill = copy(SEVERITY_FILL[severity])
+        color_cell.font = Font(bold=True, color="FFFFFFFF" if severity in {"red", "deep_orange"} else "FF000000")
+        color_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
+        ws.cell(row, 2, text).alignment = Alignment(vertical="center", wrap_text=True)
+
+    steps_header = legend_header + len(legend_rows) + 2
+    ws.merge_cells(start_row=steps_header, start_column=1, end_row=steps_header, end_column=8)
+    steps_title = ws.cell(steps_header, 1, "建议处理顺序")
+    steps_title.font = Font(bold=True, size=12, color="FF1F4E78")
+    steps = [
+        "1. 先在「问题汇总」按严重程度筛选：红 → 深橙 → 橙 → 黄 → 蓝。",
+        "2. 容间、吨位、运价可直接在「基础报表」修改；处理完在「问题汇总」的「处理结果」列写“已核对”。",
+        "3. 价格表未覆盖或缺少吨位价的，先补价格表或路线别名，再重新生成 02。",
+    ]
+    for offset, text in enumerate(steps, 1):
+        row = steps_header + offset
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+        cell = ws.cell(row, 1, text)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.row_dimensions[row].height = 24
+
+    workbook.active = workbook.sheetnames.index("问题总结")
 
 
 def _atomic_save(wb: Workbook, output: Path) -> None:
@@ -167,7 +454,7 @@ def write_review_workbook(
     base_ws = wb[layout["sheet"]]
     if base_ws.title != "基础报表":
         base_ws.title = "基础报表"
-    for title in ("结构发现", "问题汇总"):
+    for title in ("结构发现", "问题汇总", "问题总结"):
         if title in wb.sheetnames:
             wb.remove(wb[title])
     _write_structure_discovery(wb, structure or {})
@@ -257,6 +544,8 @@ def write_review_workbook(
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
             issue_number += 1
 
+    _write_issue_summary(wb, rows, month)
+
     for index, width in enumerate([10, 14, 10, 14, 30, 12, 12, 32, 32, 24], 1):
         issues_ws.column_dimensions[issues_ws.cell(1, index).column_letter].width = width
     issues_ws.sheet_view.showGridLines = False
@@ -267,7 +556,11 @@ def write_review_workbook(
     wb.close()
     check = load_workbook(output, read_only=True, data_only=False)
     try:
-        valid_structure = check.sheetnames[:2] == ["结构发现", "问题汇总"] and "基础报表" in check.sheetnames
+        valid_structure = (
+            check.sheetnames[:2] == ["结构发现", "问题汇总"]
+            and "问题总结" in check.sheetnames
+            and "基础报表" in check.sheetnames
+        )
         if valid_structure:
             header_values = next(check["基础报表"].iter_rows(
                 min_row=int(layout["header_row"]),

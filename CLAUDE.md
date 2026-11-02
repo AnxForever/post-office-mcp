@@ -39,7 +39,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 技能 | 输入 | 输出 |
 |------|------|------|
 | `post-office-model-summary` | 草滩+港务在线表 | 01 车型汇总表 |
-| `post-office-draft-report` | 01 + 车管 + 价格表 | 02 初版（含拆分元数据，出表后停下等人核对） |
+| `post-office-draft-report` | 01 + 车管 + 价格表 | 02 初版（含问题总结/问题汇总/拆分元数据，出表后停下等人核对） |
 | `post-office-split-report` | 核对后的 02 | 03 拆分版 |
 | `post-office-profit-report` | 03 或官方基础报表原版 + 财务表 | 04 一干/二干盈亏表 |
 
