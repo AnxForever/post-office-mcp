@@ -1,0 +1,18 @@
+{
+  "name": "post-office-draft-report",
+  "version": "1.0.0",
+  "type": "bound",
+  "description": "邮局基础报表初版专用技能：用上一阶段的车型汇总表 + 车管派车记录，生成 21 列初版（含问题汇总和拆分元数据），出表后停下等人工核对",
+  "scripts": {
+    "agentos_entrypoint": {
+      "file": "scripts/agentos_entrypoint.py",
+      "language": "python",
+      "description": "识别车型汇总表/车管数据/价格表，推断月份并生成基础报表初版（02）"
+    },
+    "build_review_workbook": {
+      "file": "scripts/build_review_workbook.py",
+      "language": "python",
+      "description": "把车型表与车管行匹配、匹配价格，产出初版行和问题清单"
+    }
+  }
+}

@@ -1,0 +1,114 @@
+from __future__ import annotations
+from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from reconciliation.excel_io import file_sha256, read_online_rows
+from reconciliation.model_summary import merge_online_rows, write_model_summary_workbook
+from reconciliation.paths import publish_files
+
+
+def build_model_summary(
+    caotan: Path | str,
+    gangwu: Path | str,
+    output_dir: Path | str,
+    month: str,
+) -> dict[str, object]:
+    try:
+        parsed = datetime.strptime(month, "%Y-%m")
+    except ValueError as exc:
+        raise ValueError("month 必须使用 YYYY-MM") from exc
+    caotan_path, gangwu_path = Path(caotan), Path(gangwu)
+    missing_inputs = []
+    if not caotan_path.is_file():
+        missing_inputs.append({
+            "kind": "missing",
+            "role": "online_caotan",
+            "label": "草滩在线测量表",
+            "action": f"请上传草滩在线测量表（没有找到 {caotan_path.name}）",
+        })
+    if not gangwu_path.is_file():
+        missing_inputs.append({
+            "kind": "missing",
+            "role": "online_gangwu",
+            "label": "港务在线测量表",
+            "action": f"请上传港务在线测量表（没有找到 {gangwu_path.name}）",
+        })
+    if missing_inputs:
+        return {
+            "ok": True,
+            "status": "needs_input",
+            "phase": "awaiting_inputs",
+            "target_month": month,
+            "missing_inputs": missing_inputs,
+            "message": "当前上传的文件不完整，需要补充：草滩/港务在线测量表。",
+            "next_action": "请补充在线测量表后重试。",
+        }
+
+    target_month = (parsed.year, parsed.month)
+    online_rows = read_online_rows(caotan_path, target_month, "草滩")
+    online_rows += read_online_rows(gangwu_path, target_month, "港务")
+    if not online_rows:
+        return {
+            "ok": True,
+            "status": "needs_input",
+            "phase": "awaiting_inputs",
+            "target_month": month,
+            "missing_inputs": [{
+                "kind": "month_mismatch",
+                "role": "online",
+                "label": f"{parsed.month} 月在线测量记录",
+                "action": f"在线测量表不包含目标月份 {month} 的记录，请确认月份或重新上传当月文件",
+            }],
+            "message": f"当前上传的在线测量表不包含 {month} 的记录。",
+            "next_action": "请确认目标月份或上传当月的在线测量表后重试。",
+        }
+    summary_rows = merge_online_rows(online_rows)
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    output = output_root / f"{parsed.month}月_01_车型汇总表.xlsx"
+    write_model_summary_workbook(summary_rows, output, target_month)
+    nonzero = sum(row.get("measured_volume") not in (None, "", 0, 0.0) for row in summary_rows)
+    formula_recalculated = sum(
+        row.get("volume_method") == "dimensions_formula_fallback"
+        for row in summary_rows
+    )
+    return {
+        "ok": True,
+        "phase": "summary_completed",
+        "target_month": month,
+        "outputs": [str(output.resolve())],
+        "published": publish_files([output]),
+        "metrics": {
+            "online_rows": len(online_rows),
+            "summary_rows": len(summary_rows),
+            "nonzero_volume": nonzero,
+            "unmeasured_or_inconsistent": len(summary_rows) - nonzero,
+            "formula_volume_recalculated": formula_recalculated,
+        },
+        "sha256": file_sha256(output),
+        "next_action": "如需完整月度报表，请提供全部当月输入并执行 review 阶段",
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="仅使用草滩和港务在线表生成车型汇总表")
+    parser.add_argument("--caotan", required=True, type=Path)
+    parser.add_argument("--gangwu", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--month", required=True)
+    try:
+        args = parser.parse_args(argv)
+        result = build_model_summary(args.caotan, args.gangwu, args.output_dir, args.month)
+    except Exception as exc:
+        result = {"ok": False, "phase": "failed", "errors": [str(exc)], "next_action": "请修正在线表或目标月份"}
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0 if result["ok"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

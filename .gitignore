@@ -8,6 +8,8 @@ _归档/
 
 # Skill 内置资产（模板 + 合同价格表）是包的一部分，必须入库，否则重新打包会缺文件
 !post-office-agent-v6-source/skill/post-office-monthly-reconciliation/assets/*.xlsx
+!post-office-agent-v6-source/skill/post-office-draft-report/assets/*.xlsx
+!post-office-agent-v6-source/skill/post-office-split-report/assets/*.xlsx
 
 # 打包产物与交付件（由脚本生成，不入库）
 *.zip

@@ -135,6 +135,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, help="输出目录，默认 <workspace>/output")
     parser.add_argument("--tpl-dir", type=Path, help="可选：盈亏模板目录，只用于补历史路线占位")
     parser.add_argument("--no-template-routes", action="store_true")
+    parser.add_argument("--force", action="store_true", help="确认覆盖输出目录里已有的盈亏表")
     args = parser.parse_args(argv)
 
     scripts_dir = Path(__file__).resolve().parent
@@ -181,6 +182,29 @@ def main(argv=None) -> int:
         month = inference["month"]
 
     output_dir = args.out or (args.workspace / "output")
+    try:
+        month_number = int(str(month).split("-")[1])
+    except (IndexError, ValueError):
+        print(json.dumps({
+            "ok": False, "errors": ["month 必须使用 YYYY-MM"],
+            "next_action": "请传入正确的月份",
+        }, ensure_ascii=False, indent=2))
+        return 0
+    existing = [
+        output_dir / f"{month_number}月_04_{level}盈亏表.xlsx"
+        for level in ("一干", "二干")
+    ]
+    if not args.force and any(path.exists() for path in existing):
+        found = [str(path.resolve()) for path in existing if path.exists()]
+        print(json.dumps({
+            "ok": True,
+            "status": "output_exists",
+            "phase": "needs_confirm",
+            "outputs": found,
+            "message": "输出目录里已经有这个月的盈亏表，可能是上次人工调整过的版本。直接重新生成会覆盖。",
+            "next_action": "确认要覆盖时带 --force 重跑；只想保留旧版，请把输出目录换成一个新目录。",
+        }, ensure_ascii=False, indent=2))
+        return 0
     child = [
         "build_profit_tables.py",
         "--base", str(base_file),

@@ -328,102 +328,18 @@ def _is_current_month_vehicle_row(row: Mapping[str, Any], year: int, month: int)
     )
 
 
-def build_review_workbook(
-    input_dir: Path | str,
-    workspace_dir: Path | str,
-    month: str | None = None,
+def build_review_rows(
+    model_summary_rows: list[dict[str, Any]],
+    vehicle_rows: list[dict[str, Any]],
+    catalogs: dict[str, Any],
+    aliases: dict[str, Any],
+    source_hashes: dict[str, str],
     *,
-    assets_dir: Path | str | None = None,
-    force: bool = False,
-) -> tuple[Path, Path]:
-    input_dir, workspace_dir = Path(input_dir), Path(workspace_dir)
-    package_dir = Path(__file__).resolve().parents[1]
-    assets = Path(assets_dir) if assets_dir else package_dir / "assets"
-    state_path = workspace_dir / "run-state.json"
-    if not state_path.is_file():
-        inspection = inspect_inputs(input_dir, workspace_dir, month, assets_dir=assets)
-        if not inspection["ok"]:
-            raise ValueError("输入预检失败: " + "；".join(inspection["fatal_errors"]))
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    integrity_errors = verify_state_files(state, assets, asset_names=PHASE_ONE_ASSETS)
-    if integrity_errors:
-        raise ValueError("同次运行完整性校验失败: " + "；".join(integrity_errors))
-    if state.get("phase") == "awaiting_review" and state.get("review_file"):
-        existing_summary = Path(state.get("model_summary_file", ""))
-        existing_review = Path(state["review_file"])
-        if existing_summary.is_file() and existing_review.is_file() and not force:
-            return existing_summary, existing_review
-        if force:
-            state["phase"] = "inspected"
-    if state.get("phase") != "inspected":
-        raise ValueError(f"运行状态不允许生成初版: {state.get('phase')}")
-
-    target_year, target_month = map(int, state["target_month"].split("-"))
-    source_bundle = state.get("source_bundle", "split")
-    caotan_paths = _source_paths(state, "online_caotan")
-    gangwu_paths = _source_paths(state, "online_gangwu")
-    measure_paths = _source_paths(state, "online_measure")
-    vehicle_paths = _source_paths(state, "vehicle")
-    platform_paths = _source_paths(state, "vehicle_platform")
-    # 基础报表原版是可选的：传了就用来逐单对价，没传就跳过。
-    base_report_paths = _source_paths(state, "base_report")
-    first_price_paths = _source_paths(state, "first_price")
-    second_price_paths = _source_paths(state, "second_price")
-    draft_template_paths = _source_paths(state, "draft_template")
-    # 模板优先用上传的，没有则用 skill 内置模板
-    if not draft_template_paths:
-        bundled = assets / "draft-template.xlsx"
-        if bundled.is_file():
-            draft_template_paths = [bundled]
-    expected_vehicle_count = int(state.get("expected_role_counts", {}).get("vehicle", 6))
-    if source_bundle == "merged":
-        source_ok = len(measure_paths) == 1 and len(platform_paths) == 1
-    else:
-        source_ok = (
-            len(caotan_paths) == 1
-            and len(gangwu_paths) == 1
-            and len(vehicle_paths) == expected_vehicle_count
-        )
-    if (
-        not source_ok
-        or len(first_price_paths) != 1
-        or len(second_price_paths) != 1
-        or len(draft_template_paths) != 1
-    ):
-        raise ValueError("运行状态中的输入角色数量无效，请重新预检")
-
-    if source_bundle == "merged":
-        online_rows = read_measure_rows(measure_paths[0], (target_year, target_month))
-        vehicle_rows = [
-            row
-            for row in read_vehicle_platform_rows(platform_paths[0])
-            if _is_current_month_vehicle_row(row, target_year, target_month)
-        ]
-        vehicle_source_role = "vehicle_platform"
-    else:
-        online_rows = read_online_rows(caotan_paths[0], (target_year, target_month), "草滩")
-        online_rows += read_online_rows(gangwu_paths[0], (target_year, target_month), "港务")
-        company_map = load_company_map(assets / "company-map.json")
-        vehicle_rows = [
-            row
-            for row in read_vehicle_rows(vehicle_paths, company_map)
-            if _is_current_month_vehicle_row(row, target_year, target_month)
-        ]
-        vehicle_source_role = "vehicle"
-    model_summary_rows = merge_online_rows(online_rows)
+    source_bundle: str = "split",
+    base_report_path: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """把车型表/车管行构造成初版行；不依赖 run-state，供独立初版技能复用。"""
     model_index = index_model_summary(model_summary_rows)
-    source_hashes = {
-        str(Path(item["path"]).resolve()): item["sha256"]
-        for item in _source_entries(state, vehicle_source_role)
-        if item.get("path") and item.get("sha256")
-    }
-    catalogs = {
-        "first": read_price_catalog(first_price_paths[0], "first"),
-        "second": read_price_catalog(second_price_paths[0], "second"),
-    }
-    draft_layout = discover_draft_template(draft_template_paths[0])
-    aliases = _load_json(assets / "route-aliases.json")
-
     review_rows: list[dict[str, Any]] = []
     model_matched = 0
     matched_model_keys: set[tuple] = set()
@@ -509,8 +425,8 @@ def build_review_workbook(
     # 价格表里有一批大车走的是封顶系数，各表封顶值不同（1.106/1.13/1.154 都出现过），
     # 规则没确认前不猜，只如实标记，由人工核对。
     comparison_stats: dict[str, int] = {}
-    if base_report_paths:
-        comparison_stats = _compare_with_official(review_rows, base_report_paths[0])
+    if base_report_path:
+        comparison_stats = _compare_with_official(review_rows, base_report_path)
 
     # 反向补充：在线表有测量记录但车管无派车数据的行
     for model in model_summary_rows:
@@ -566,6 +482,114 @@ def build_review_workbook(
         normalize_plate(r.get("plate") or ""),
         0 if r.get("company") != "在线测量（无派车记录）" else 1,
     ))
+
+    return review_rows, model_matched, comparison_stats
+
+
+def build_review_workbook(
+    input_dir: Path | str,
+    workspace_dir: Path | str,
+    month: str | None = None,
+    *,
+    assets_dir: Path | str | None = None,
+    force: bool = False,
+) -> tuple[Path, Path]:
+    input_dir, workspace_dir = Path(input_dir), Path(workspace_dir)
+    package_dir = Path(__file__).resolve().parents[1]
+    assets = Path(assets_dir) if assets_dir else package_dir / "assets"
+    state_path = workspace_dir / "run-state.json"
+    if not state_path.is_file():
+        inspection = inspect_inputs(input_dir, workspace_dir, month, assets_dir=assets)
+        if not inspection["ok"]:
+            raise ValueError("输入预检失败: " + "；".join(inspection["fatal_errors"]))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    integrity_errors = verify_state_files(state, assets, asset_names=PHASE_ONE_ASSETS)
+    if integrity_errors:
+        raise ValueError("同次运行完整性校验失败: " + "；".join(integrity_errors))
+    if state.get("phase") == "awaiting_review" and state.get("review_file"):
+        existing_summary = Path(state.get("model_summary_file", ""))
+        existing_review = Path(state["review_file"])
+        if existing_summary.is_file() and existing_review.is_file() and not force:
+            return existing_summary, existing_review
+        if force:
+            state["phase"] = "inspected"
+    if state.get("phase") != "inspected":
+        raise ValueError(f"运行状态不允许生成初版: {state.get('phase')}")
+
+    target_year, target_month = map(int, state["target_month"].split("-"))
+    source_bundle = state.get("source_bundle", "split")
+    caotan_paths = _source_paths(state, "online_caotan")
+    gangwu_paths = _source_paths(state, "online_gangwu")
+    measure_paths = _source_paths(state, "online_measure")
+    vehicle_paths = _source_paths(state, "vehicle")
+    platform_paths = _source_paths(state, "vehicle_platform")
+    # 基础报表原版是可选的：传了就用来逐单对价，没传就跳过。
+    base_report_paths = _source_paths(state, "base_report")
+    first_price_paths = _source_paths(state, "first_price")
+    second_price_paths = _source_paths(state, "second_price")
+    draft_template_paths = _source_paths(state, "draft_template")
+    # 模板优先用上传的，没有则用 skill 内置模板
+    if not draft_template_paths:
+        bundled = assets / "draft-template.xlsx"
+        if bundled.is_file():
+            draft_template_paths = [bundled]
+    expected_vehicle_count = int(state.get("expected_role_counts", {}).get("vehicle", 6))
+    if source_bundle == "merged":
+        source_ok = len(measure_paths) == 1 and len(platform_paths) == 1
+    else:
+        source_ok = (
+            len(caotan_paths) == 1
+            and len(gangwu_paths) == 1
+            and len(vehicle_paths) == expected_vehicle_count
+        )
+    if (
+        not source_ok
+        or len(first_price_paths) != 1
+        or len(second_price_paths) != 1
+        or len(draft_template_paths) != 1
+    ):
+        raise ValueError("运行状态中的输入角色数量无效，请重新预检")
+
+    if source_bundle == "merged":
+        online_rows = read_measure_rows(measure_paths[0], (target_year, target_month))
+        vehicle_rows = [
+            row
+            for row in read_vehicle_platform_rows(platform_paths[0])
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle_platform"
+    else:
+        online_rows = read_online_rows(caotan_paths[0], (target_year, target_month), "草滩")
+        online_rows += read_online_rows(gangwu_paths[0], (target_year, target_month), "港务")
+        company_map = load_company_map(assets / "company-map.json")
+        vehicle_rows = [
+            row
+            for row in read_vehicle_rows(vehicle_paths, company_map)
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle"
+    model_summary_rows = merge_online_rows(online_rows)
+    source_hashes = {
+        str(Path(item["path"]).resolve()): item["sha256"]
+        for item in _source_entries(state, vehicle_source_role)
+        if item.get("path") and item.get("sha256")
+    }
+    catalogs = {
+        "first": read_price_catalog(first_price_paths[0], "first"),
+        "second": read_price_catalog(second_price_paths[0], "second"),
+    }
+    draft_layout = discover_draft_template(draft_template_paths[0])
+    aliases = _load_json(assets / "route-aliases.json")
+
+    review_rows, model_matched, comparison_stats = build_review_rows(
+        model_summary_rows,
+        vehicle_rows,
+        catalogs,
+        aliases,
+        source_hashes,
+        source_bundle=source_bundle,
+        base_report_path=base_report_paths[0] if base_report_paths else None,
+    )
 
     model_summary_output = workspace_dir / f"{target_month}月_01_车型汇总表.xlsx"
     output = workspace_dir / f"{target_month}月_02_基础报表初版.xlsx"

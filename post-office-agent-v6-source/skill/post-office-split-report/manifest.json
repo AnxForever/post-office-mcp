@@ -1,0 +1,18 @@
+{
+  "name": "post-office-split-report",
+  "version": "1.0.0",
+  "type": "bound",
+  "description": "邮局基础报表拆分专用技能：把人工核对后的 02 初版拆成路线页签（03），不依赖同一任务的运行状态",
+  "scripts": {
+    "agentos_entrypoint": {
+      "file": "scripts/agentos_entrypoint.py",
+      "language": "python",
+      "description": "识别 02 初版和拆分元数据，推断月份并生成基础报表拆分版（03）"
+    },
+    "build_split_report": {
+      "file": "scripts/build_split_report.py",
+      "language": "python",
+      "description": "读取 02 基础报表和拆分元数据，按标准邮路拆成路线页签"
+    }
+  }
+}

@@ -32,6 +32,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `post-office-monthly-reports-skill.zip` — AgentOS 后台 skill 包
 - 官方原版是 reconcile-monthly-transport-reports.zip，V5.3 在此基础上修了三处
 
+### v6 四个独立技能（推荐）
+
+`post-office-agent-v6-source/skill/` 下，互不依赖 `run-state.json`，按顺序文件交接：
+
+| 技能 | 输入 | 输出 |
+|------|------|------|
+| `post-office-model-summary` | 草滩+港务在线表 | 01 车型汇总表 |
+| `post-office-draft-report` | 01 + 车管 + 价格表 | 02 初版（含拆分元数据，出表后停下等人核对） |
+| `post-office-split-report` | 核对后的 02 | 03 拆分版 |
+| `post-office-profit-report` | 03 或官方基础报表原版 + 财务表 | 04 一干/二干盈亏表 |
+
+打包：`python post-office-agent-v6-source/build_independent_skill_packages.py`
+
+用户会反复改数据重跑：02/03 已存在时返回 `output_exists`，不自动覆盖。02 带 `--force`
+覆盖、带 `--previous-review <旧02>` 带回人工修改；03 带 `--force` 覆盖。
+
 ## 数据文件
 
 - 在线表: `数据/草滩在线表.xlsx`, `数据/港务在线表.xlsx`

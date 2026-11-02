@@ -1,0 +1,18 @@
+{
+  "name": "post-office-model-summary",
+  "version": "1.0.0",
+  "type": "bound",
+  "description": "邮局车型汇总表专用技能：只上传草滩和港务两张在线测量表，合并成当月的车型汇总表",
+  "scripts": {
+    "agentos_entrypoint": {
+      "file": "scripts/agentos_entrypoint.py",
+      "language": "python",
+      "description": "识别草滩/港务在线表、推断月份并生成车型汇总表"
+    },
+    "build_model_summary": {
+      "file": "scripts/build_model_summary.py",
+      "language": "python",
+      "description": "合并草滩+港务在线测量记录，输出 01_车型汇总表"
+    }
+  }
+}

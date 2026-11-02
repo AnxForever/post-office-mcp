@@ -1,0 +1,719 @@
+from __future__ import annotations
+from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from datetime import date
+from pathlib import Path
+from typing import Any, Mapping
+
+from openpyxl import load_workbook
+
+from inspect_inputs import inspect_inputs
+from reconciliation.calculations import apply_cross_tonnage_flags
+from reconciliation.excel_io import (
+    file_sha256,
+    load_company_map,
+    read_measure_rows,
+    read_online_rows,
+    read_price_catalog,
+    read_vehicle_platform_rows,
+    read_vehicle_rows,
+)
+from reconciliation.matching import (
+    Issue,
+    _date_key,
+    apply_settlement_tonnage,
+    index_model_summary,
+    match_price,
+    match_vehicle_row,
+)
+from reconciliation.integrity import PHASE_ONE_ASSETS, verify_state_files
+from reconciliation.model_summary import merge_online_rows, write_model_summary_workbook
+from reconciliation.normalize import normalize_plate, normalize_text, normalize_trailer
+from reconciliation.templates import write_review_workbook
+from reconciliation.template_discovery import discover_draft_template
+
+
+_DYNAMIC_WARNING_PREFIXES = (
+    "在线记录数与车型表差距为 ",
+    "价格匹配率为 ",
+    "车管匹配率为 ",
+)
+
+IMAGE_FORMULA = re.compile(r"^\s*=\s*(?:_xlfn\.)?dispimg\s*\(", re.IGNORECASE)
+NUMERIC_MODEL_PROBLEM = re.compile(r"^\d+(?:\.0+)?$")
+TRAILER_LIKE_MODEL_PROBLEM = re.compile(r"^[\u4e00-\u9fff][A-Z0-9]{2,}挂$", re.IGNORECASE)
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, dict) and isinstance(value.get("aliases"), dict):
+        return value["aliases"]
+    return value if isinstance(value, dict) else {}
+
+
+def _save_state(path: Path, state: dict[str, Any]) -> None:
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _source_entries(state: Mapping[str, Any], role: str) -> list[dict[str, Any]]:
+    sources = state.get("sources", {})
+    if isinstance(sources, Mapping):
+        entries = sources.get(role, [])
+        return [dict(item) for item in entries if isinstance(item, Mapping)]
+    return [dict(item) for item in sources if isinstance(item, Mapping) and item.get("role") == role]
+
+
+def _source_paths(state: Mapping[str, Any], role: str) -> list[Path]:
+    return [Path(item["path"]) for item in _source_entries(state, role)]
+
+
+def _vehicle_source_id(vehicle: Mapping[str, Any], source_hashes: Mapping[str, str]) -> str:
+    source_path = str(Path(vehicle["source_path"]).resolve())
+    source_sha256 = source_hashes.get(source_path)
+    if not source_sha256:
+        raise ValueError(f"车管源文件未在运行状态中锁定: {vehicle.get('source_file')}")
+    return f"V:{source_sha256}:{vehicle['source_sheet']}:{vehicle['source_row']}"
+
+
+def _unmatched_issue(vehicle: Mapping[str, Any]) -> Issue:
+    execution_date = vehicle.get("execution_date")
+    date_text = execution_date.isoformat() if isinstance(execution_date, date) else str(execution_date or "")
+    plate = normalize_plate(vehicle.get("plate"))
+    location = f"{vehicle.get('source_file')}/{vehicle.get('source_sheet')}/第{vehicle.get('source_row')}行"
+    return Issue(
+        "model_summary_missing",
+        "red",
+        f"未匹配车型汇总：精确匹配键 {date_text}+{plate}；来源 {location}",
+        "核对该日期和车牌的在线测量记录，或人工补充容间及依赖字段",
+    )
+
+
+def _data_missing_flag(vehicle: dict[str, Any], price: Any) -> str:
+    """数据缺失：公里、吨位、运价等无法从价格表获取"""
+    if price is not None:
+        if price.distance is None:
+            return "是"
+        if price.tonnage is None and price.freight is None:
+            return "是"
+    return "否"
+
+
+def _missing_location(vehicle: dict[str, Any], price: Any) -> str:
+    """缺失来源"""
+    if price is not None and price.distance is None:
+        return "价格表（无公里/运价）"
+    return ""
+
+
+def _online_orphan_issue(model: Mapping[str, Any]) -> Issue:
+    return Issue(
+        "vehicle_dispatch_missing",
+        "red",
+        f"在线表有测量记录但车管无对应派车数据：{model.get('measurement_date')} {model.get('plate')} {model.get('route') or ''}",
+        "核对是否漏录派车单，或确认该车为加车/临调后人工补充行信息",
+    )
+
+
+def _model_issues(model: Mapping[str, Any]) -> list[Issue]:
+    note = model.get("zero_value_note")
+    issues: list[Issue] = []
+    if note == "在线记录确认未测量":
+        issues.append(Issue("online_unmeasured", "orange", note, "人工确认是否保持0"))
+    elif note == "在线零值与尺寸不一致":
+        issues.append(Issue("online_zero_inconsistent", "red", note, "回查原始测量表"))
+    # 同车牌兜底取到的容间不是本趟实测：V5 用浅蓝标出，V6 也要落成可见标记，
+    # 否则这批复用值在初版里和精确测量值长得一模一样。
+    if model.get("_cross_station"):
+        measured = model.get("measurement_date")
+        measured_text = measured.isoformat() if hasattr(measured, "isoformat") else str(measured or "")
+        issues.append(Issue(
+            "volume_cross_date",
+            "blue",
+            f"容间取自同车牌其他日期的在线测量记录（{measured_text}），非本趟实测",
+            "复核该趟车型是否与所取测量记录一致，不一致时人工改填容间",
+        ))
+    return issues
+
+
+def _is_image_formula(value: Any) -> bool:
+    return isinstance(value, str) and IMAGE_FORMULA.match(value) is not None
+
+
+def _merge_remarks(*values: Any) -> str | None:
+    result: list[str] = []
+    for value in values:
+        if _is_image_formula(value):
+            continue
+        text = normalize_text(value)
+        if text and text not in result:
+            result.append(text)
+    return "；".join(result) or None
+
+
+def _format_review_remark(
+    model_problem: Any,
+    model_remark: Any,
+    issues: list[Issue],
+    *,
+    round_trip: bool = False,
+) -> str | None:
+    """备注列只写业务标记（往返邮路），问题全部进问题汇总Sheet."""
+    if round_trip:
+        # 第二阶段只拿到修订初版，无法回读车管；用备注把往返标记带过去。
+        return "往返邮路"
+    return None
+    original = normalize_text(model_problem)  # unreachable, kept for reference
+    if original and re.fullmatch(r"\d+(?:\.0+)?", original):
+        n = int(float(original))
+        original = f"{n}(疑似{n}轴车)"
+    parts = []
+    if original:
+        parts.append(original)
+    for issue in issues:
+        text = normalize_text(issue.message)
+        if text and text != original and text not in parts:
+            parts.append(text)
+    if model_remark:
+        text = normalize_text(model_remark)
+        if text and text != original and text not in parts and not _is_image_formula(model_remark):
+            parts.append(text)
+    return " | ".join(parts) if parts else None
+
+
+# 平台容间与实测容积差到这个程度，就认为平台那条不可信（如平台 64 而实测 71）。
+MERGED_VOLUME_TOLERANCE = 5
+
+
+def _merged_volume(
+    vehicle: Mapping[str, Any],
+    model: Mapping[str, Any] | None,
+    measured: Any,
+    issues: list[Issue],
+) -> tuple[Any, list[Issue]]:
+    """合并口径的容间取数：平台容间优先，异常才用实测值。
+
+    官方报表逐单核对结果是平台容间一致 3210/3256，实测容积只对得上一半，
+    所以这里不再以实测值为准。平台值为空、或与实测相差超过容差时回退实测，
+    并把回退原因写进问题列表，方便人工复核。
+    """
+    platform = vehicle.get("platform_capacity")
+    try:
+        platform_value = float(platform) if platform not in (None, "") else None
+    except (TypeError, ValueError):
+        platform_value = None
+    measured_value = None
+    if isinstance(measured, (int, float)) and measured > 0:
+        measured_value = float(measured)
+    if platform_value is not None and platform_value > 0:
+        if measured_value is None:
+            return platform_value, issues
+        if abs(platform_value - measured_value) <= MERGED_VOLUME_TOLERANCE:
+            return platform_value, issues
+        updated = list(issues)
+        updated.append(Issue(
+            "volume_platform_vs_measured",
+            "orange",
+            f"平台容间{platform_value:g}与实测{measured_value:g}相差超过"
+            f"{MERGED_VOLUME_TOLERANCE}方，按平台值计，请核对是否测量有误",
+            "人工确认容间",
+        ))
+        return platform_value, updated
+    if measured_value is not None:
+        updated = list(issues)
+        updated.append(Issue(
+            "volume_from_measured",
+            "orange",
+            "平台未提供容间，已改用测量表容积",
+            "人工确认容间",
+        ))
+        return measured_value, updated
+    return None, issues
+
+
+def _compare_with_official(
+    review_rows: list[dict[str, Any]],
+    base_report_path: Path,
+) -> dict[str, int]:
+    """按派车单号和官方基础报表逐单对价，不一致的行加标记。
+
+    官方 58 张路线表里有一批大车是按「封顶系数」计价的，各表封顶值不同
+    （东莞 1.106、北京 1.13、佛山 1.154…），规则尚未确认。这里不猜规则，
+    只把与官方不一致的行标橙，人工一眼能看到需要复核哪些。
+    容间差异同样标出来，但两者分开计数。
+    """
+    official: dict[str, dict[str, Any]] = {}
+    try:
+        workbook = load_workbook(base_report_path, read_only=True, data_only=True, keep_links=False)
+    except Exception:
+        return {"available": 0, "price_diff": 0, "volume_diff": 0}
+    try:
+        for sheet in workbook.worksheets:
+            if hasattr(sheet, "reset_dimensions"):
+                sheet.reset_dimensions()
+            stream = sheet.iter_rows(values_only=True)
+            header = next(stream, None) or ()
+            columns: dict[str, int] = {}
+            for index, value in enumerate(header):
+                key = normalize_text(value)
+                if key and key not in columns:
+                    columns[key] = index
+            dispatch_column = columns.get("派车单号")
+            if dispatch_column is None:
+                continue
+            price_column = columns.get("运价")
+            volume_column = columns.get("容间")
+            for row in stream:
+                if dispatch_column >= len(row):
+                    continue
+                key = normalize_text(row[dispatch_column])
+                if not key:
+                    continue
+                official.setdefault(key, {
+                    "price": row[price_column] if price_column is not None and price_column < len(row) else None,
+                    "volume": row[volume_column] if volume_column is not None and volume_column < len(row) else None,
+                })
+    finally:
+        workbook.close()
+    if not official:
+        return {"available": 0, "price_diff": 0, "volume_diff": 0}
+
+    price_diff = volume_diff = compared = 0
+    for row in review_rows:
+        entry = official.get(normalize_text(row.get("dispatch_no")))
+        if entry is None:
+            continue
+        compared += 1
+        issues = row.setdefault("issues", [])
+        if not _close(row.get("volume"), entry.get("volume"), 0.51):
+            volume_diff += 1
+            issues.append(Issue(
+                "official_volume_diff", "orange",
+                f"容间与官方报表不一致（本表 {row.get('volume')}，官方 {entry.get('volume')}）",
+                "核对车辆实测容间",
+            ))
+        if not _close(row.get("freight"), entry.get("price"), 0.51):
+            price_diff += 1
+            issues.append(Issue(
+                "official_price_diff", "orange",
+                f"运价与官方报表不一致（本表 {row.get('freight')}，官方 {entry.get('price')}）",
+                "核对价格表档位或封顶规则",
+            ))
+    return {"available": compared, "price_diff": price_diff, "volume_diff": volume_diff}
+
+
+def _close(left: Any, right: Any, tolerance: float) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except (TypeError, ValueError):
+        # 两边都空算一致；一边空一边有值算不一致。
+        return (left in (None, "")) and (right in (None, ""))
+
+
+def _is_current_month_vehicle_row(row: Mapping[str, Any], year: int, month: int) -> bool:
+    execution_date = row.get("execution_date")
+    return bool(
+        isinstance(execution_date, date)
+        and (execution_date.year, execution_date.month) == (year, month)
+        and normalize_plate(row.get("plate"))
+        and normalize_text(row.get("route"))
+    )
+
+
+def build_review_rows(
+    model_summary_rows: list[dict[str, Any]],
+    vehicle_rows: list[dict[str, Any]],
+    catalogs: dict[str, Any],
+    aliases: dict[str, Any],
+    source_hashes: dict[str, str],
+    *,
+    source_bundle: str = "split",
+    base_report_path: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """把车型表/车管行构造成初版行；不依赖 run-state，供独立初版技能复用。"""
+    model_index = index_model_summary(model_summary_rows)
+    review_rows: list[dict[str, Any]] = []
+    model_matched = 0
+    matched_model_keys: set[tuple] = set()
+    for vehicle in vehicle_rows:
+        model = match_vehicle_row(vehicle, model_index)
+        if model is not None:
+            model_matched += 1
+            measurement_date = _date_key(model.get("measurement_date"))
+            plate = normalize_plate(model.get("plate"))
+            if measurement_date and plate:
+                matched_model_keys.add((measurement_date, plate))
+        issues = _model_issues(model) if model is not None else [_unmatched_issue(vehicle)]
+        volume = model.get("measured_volume") if model is not None else None
+        if source_bundle == "merged":
+            # 官方报表的「容间」取车管平台那一列，不是测量表的实测容积：
+            # 与 58 张路线表逐单对账，平台容间一致 3210/3256，实测值只有一半对得上。
+            # 平台缺失或明显异常（平台 64 而实测 71 这种）时，才回退到测量值。
+            volume, issues = _merged_volume(vehicle, model, volume, issues)
+        # 车管「往返属性=往返、邮路往返属性=去程」的行按往返价结算，
+        # 同单号的返程行不单独计价。
+        round_trip = (
+            normalize_text(vehicle.get("round_trip_attribute")) == "往返"
+            and normalize_text(vehicle.get("route_direction")) != "返程"
+        )
+        # Even when the vehicle has no model-summary match, resolve the route
+        # with a zero volume. This preserves the official price-table distance
+        # and route type in the issue row while leaving tonnage/freight blank.
+        price = match_price(
+            vehicle.get("route"),
+            # 合并口径下容间来自平台那一列，与「有没有匹配到车型记录」无关：
+            # 车型记录经常存在但测量容积为空，此时 volume 仍是有效值，
+            # 早先这里写成 `volume if model is not None else 0` 会把它换成 0，
+            # 于是一律落到「容间低于最低档」（9 月有 306 行）。
+            volume if volume not in (None, "") else 0,
+            catalogs,
+            aliases,
+            round_trip=round_trip,
+        )
+        issues.extend(price.issues)
+        source_id = _vehicle_source_id(vehicle, source_hashes)
+        review_rows.append({
+            "source_id": source_id,
+            "source_path": vehicle.get("source_path"),
+            "source_file": vehicle.get("source_file"),
+            "source_sheet": vehicle.get("source_sheet"),
+            "source_row": vehicle["source_row"],
+            "company": vehicle.get("company"),
+            "dispatch_no": vehicle.get("dispatch_no"),
+            "route": vehicle.get("route"),
+            "seal_time": vehicle.get("execution_date"),
+            "plate": vehicle.get("plate"),
+            "trailer": vehicle.get("trailer"),
+            "plate_key": vehicle.get("plate_key"),
+            "trailer_key": vehicle.get("trailer_key"),
+            "volume": volume,
+            "tonnage": price.tonnage if price is not None else None,
+            "model_tonnage": price.model_tonnage if price is not None else None,
+            "settlement_tonnage": vehicle.get("settlement_tonnage"),
+            "distance": price.distance if price is not None else None,
+            "transport_volume": vehicle.get("transport_volume"),
+            "freight": price.freight if price is not None else None,
+            "standard_price": price.standard_price if price is not None else None,
+            "coefficient": price.coefficient if price is not None else None,
+            "price_kind": price.kind if price is not None else None,
+            "standard_route": price.route if price is not None else None,
+            "downgraded": bool(price and price.downgraded),
+            "original_coefficient": price.original_coefficient if price is not None else None,
+            "original_freight": price.original_freight if price is not None else None,
+            "price_difference": price.price_difference if price is not None else None,
+            "remark": _format_review_remark(
+                model.get("model_problem") if model is not None else None,
+                model.get("remark") if model is not None else None,
+                issues,
+                round_trip=round_trip,
+            ),
+            "vehicle_missing": "是" if model is None else "否",
+            "data_missing": "否" if model is None else _data_missing_flag(vehicle, price),
+            "missing_location": "" if model is None else _missing_location(vehicle, price),
+            "issues": issues,
+        })
+    apply_cross_tonnage_flags(review_rows)
+    # 上传了基础报表原版时，逐单和官方报价比一遍，把对不上的行标出来。
+    # 价格表里有一批大车走的是封顶系数，各表封顶值不同（1.106/1.13/1.154 都出现过），
+    # 规则没确认前不猜，只如实标记，由人工核对。
+    comparison_stats: dict[str, int] = {}
+    if base_report_path:
+        comparison_stats = _compare_with_official(review_rows, base_report_path)
+
+    # 反向补充：在线表有测量记录但车管无派车数据的行
+    for model in model_summary_rows:
+        measurement_date = _date_key(model.get("measurement_date"))
+        plate = normalize_plate(model.get("plate"))
+        if not measurement_date or not plate:
+            continue
+        if (measurement_date, plate) in matched_model_keys:
+            continue
+        orphan_issues = [_online_orphan_issue(model)]
+        route = model.get("route")
+        price = match_price(route, model.get("measured_volume", 0), catalogs, aliases)
+        orphan_issues.extend(price.issues)
+        review_rows.append({
+            "source_id": f"ONLINE_ONLY:{model.get('source_file','')}:{model.get('source_sheet','')}:{model.get('source_row','')}",
+            "source_path": model.get("source_path", ""),
+            "source_file": model.get("source_file", ""),
+            "source_sheet": model.get("source_sheet", ""),
+            "source_row": model.get("source_row", ""),
+            "company": "在线测量（无派车记录）",
+            "dispatch_no": "",
+            "route": route,
+            "seal_time": model.get("measurement_date"),
+            "plate": model.get("plate"),
+            "trailer": model.get("trailer", "--"),
+            "plate_key": plate,
+            "trailer_key": normalize_trailer(model.get("trailer")),
+            "volume": model.get("measured_volume"),
+            "tonnage": price.tonnage if price is not None else None,
+            "model_tonnage": None,
+            "settlement_tonnage": None,
+            "distance": price.distance if price is not None else None,
+            "transport_volume": None,
+            "freight": price.freight if price is not None else None,
+            "standard_price": price.standard_price if price is not None else None,
+            "coefficient": price.coefficient if price is not None else None,
+            "price_kind": price.kind if price is not None else None,
+            "standard_route": price.route if price is not None else None,
+            "downgraded": False,
+            "original_coefficient": None,
+            "original_freight": None,
+            "price_difference": None,
+            "remark": None,
+            "vehicle_missing": "是",
+            "data_missing": "否",
+            "missing_location": "车管",
+            "issues": orphan_issues,
+        })
+
+    # 按日期+车牌排序：车管行在前，在线独有行在后
+    review_rows.sort(key=lambda r: (
+        r.get("seal_time") or date.min,
+        normalize_plate(r.get("plate") or ""),
+        0 if r.get("company") != "在线测量（无派车记录）" else 1,
+    ))
+
+    return review_rows, model_matched, comparison_stats
+
+
+def build_review_workbook(
+    input_dir: Path | str,
+    workspace_dir: Path | str,
+    month: str | None = None,
+    *,
+    assets_dir: Path | str | None = None,
+    force: bool = False,
+) -> tuple[Path, Path]:
+    input_dir, workspace_dir = Path(input_dir), Path(workspace_dir)
+    package_dir = Path(__file__).resolve().parents[1]
+    assets = Path(assets_dir) if assets_dir else package_dir / "assets"
+    state_path = workspace_dir / "run-state.json"
+    if not state_path.is_file():
+        inspection = inspect_inputs(input_dir, workspace_dir, month, assets_dir=assets)
+        if not inspection["ok"]:
+            raise ValueError("输入预检失败: " + "；".join(inspection["fatal_errors"]))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    integrity_errors = verify_state_files(state, assets, asset_names=PHASE_ONE_ASSETS)
+    if integrity_errors:
+        raise ValueError("同次运行完整性校验失败: " + "；".join(integrity_errors))
+    if state.get("phase") == "awaiting_review" and state.get("review_file"):
+        existing_summary = Path(state.get("model_summary_file", ""))
+        existing_review = Path(state["review_file"])
+        if existing_summary.is_file() and existing_review.is_file() and not force:
+            return existing_summary, existing_review
+        if force:
+            state["phase"] = "inspected"
+    if state.get("phase") != "inspected":
+        raise ValueError(f"运行状态不允许生成初版: {state.get('phase')}")
+
+    target_year, target_month = map(int, state["target_month"].split("-"))
+    source_bundle = state.get("source_bundle", "split")
+    caotan_paths = _source_paths(state, "online_caotan")
+    gangwu_paths = _source_paths(state, "online_gangwu")
+    measure_paths = _source_paths(state, "online_measure")
+    vehicle_paths = _source_paths(state, "vehicle")
+    platform_paths = _source_paths(state, "vehicle_platform")
+    # 基础报表原版是可选的：传了就用来逐单对价，没传就跳过。
+    base_report_paths = _source_paths(state, "base_report")
+    first_price_paths = _source_paths(state, "first_price")
+    second_price_paths = _source_paths(state, "second_price")
+    draft_template_paths = _source_paths(state, "draft_template")
+    # 模板优先用上传的，没有则用 skill 内置模板
+    if not draft_template_paths:
+        bundled = assets / "draft-template.xlsx"
+        if bundled.is_file():
+            draft_template_paths = [bundled]
+    expected_vehicle_count = int(state.get("expected_role_counts", {}).get("vehicle", 6))
+    if source_bundle == "merged":
+        source_ok = len(measure_paths) == 1 and len(platform_paths) == 1
+    else:
+        source_ok = (
+            len(caotan_paths) == 1
+            and len(gangwu_paths) == 1
+            and len(vehicle_paths) == expected_vehicle_count
+        )
+    if (
+        not source_ok
+        or len(first_price_paths) != 1
+        or len(second_price_paths) != 1
+        or len(draft_template_paths) != 1
+    ):
+        raise ValueError("运行状态中的输入角色数量无效，请重新预检")
+
+    if source_bundle == "merged":
+        online_rows = read_measure_rows(measure_paths[0], (target_year, target_month))
+        vehicle_rows = [
+            row
+            for row in read_vehicle_platform_rows(platform_paths[0])
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle_platform"
+    else:
+        online_rows = read_online_rows(caotan_paths[0], (target_year, target_month), "草滩")
+        online_rows += read_online_rows(gangwu_paths[0], (target_year, target_month), "港务")
+        company_map = load_company_map(assets / "company-map.json")
+        vehicle_rows = [
+            row
+            for row in read_vehicle_rows(vehicle_paths, company_map)
+            if _is_current_month_vehicle_row(row, target_year, target_month)
+        ]
+        vehicle_source_role = "vehicle"
+    model_summary_rows = merge_online_rows(online_rows)
+    source_hashes = {
+        str(Path(item["path"]).resolve()): item["sha256"]
+        for item in _source_entries(state, vehicle_source_role)
+        if item.get("path") and item.get("sha256")
+    }
+    catalogs = {
+        "first": read_price_catalog(first_price_paths[0], "first"),
+        "second": read_price_catalog(second_price_paths[0], "second"),
+    }
+    draft_layout = discover_draft_template(draft_template_paths[0])
+    aliases = _load_json(assets / "route-aliases.json")
+
+    review_rows, model_matched, comparison_stats = build_review_rows(
+        model_summary_rows,
+        vehicle_rows,
+        catalogs,
+        aliases,
+        source_hashes,
+        source_bundle=source_bundle,
+        base_report_path=base_report_paths[0] if base_report_paths else None,
+    )
+
+    model_summary_output = workspace_dir / f"{target_month}月_01_车型汇总表.xlsx"
+    output = workspace_dir / f"{target_month}月_02_基础报表初版.xlsx"
+    write_model_summary_workbook(model_summary_rows, model_summary_output, (target_year, target_month))
+    write_review_workbook(
+        review_rows,
+        draft_template_paths[0],
+        output,
+        (target_year, target_month),
+        structure={"sources": state.get("sources", []), "catalogs": catalogs},
+    )
+    issue_counter = Counter(issue.code for row in review_rows for issue in row.get("issues", []))
+    price_matched = sum(1 for row in review_rows if row.get("standard_price") is not None)
+    problem_count = sum(len(row.get("issues", [])) for row in review_rows)
+    nonzero_selections = sum(
+        row.get("measured_volume") not in (None, "", 0, 0.0)
+        for row in model_summary_rows
+    )
+    formula_recalculated = sum(
+        row.get("volume_method") == "dimensions_formula_fallback"
+        for row in model_summary_rows
+    )
+    count = len(review_rows)
+    warnings = [
+        warning for warning in state.get("warnings", [])
+        if not str(warning).startswith(_DYNAMIC_WARNING_PREFIXES)
+    ]
+    online_gap = abs(len(model_summary_rows) - count) / count if count else 0
+    if online_gap >= 0.10:
+        warnings.append(f"在线记录数与车型表差距为 {online_gap:.1%}")
+    if count and price_matched / count < 0.90:
+        warnings.append(f"价格匹配率为 {price_matched / count:.1%}，低于90%")
+    warnings = list(dict.fromkeys(warnings))
+    state.update({
+        "phase": "awaiting_review",
+        "status": "awaiting_review",
+        "model_summary_file": str(model_summary_output.resolve()),
+        "model_summary_sha256": file_sha256(model_summary_output),
+        "review_file": str(output.resolve()),
+        "review_sha256": file_sha256(output),
+        "output_paths": {
+            "model_summary": str(model_summary_output.resolve()),
+            "review": str(output.resolve()),
+        },
+        "output_hashes": {
+            model_summary_output.name: file_sha256(model_summary_output),
+            output.name: file_sha256(output),
+        },
+        "template_layouts": {
+            **state.get("template_layouts", {}),
+            "draft": draft_layout,
+        },
+        "row_count": count,
+        # 必须从 review_rows 生成，不能用 zip(review_rows, vehicle_rows)：
+        # 上面「反向补充」已经往 review_rows 追加了在线独有行（无派车记录），
+        # zip 会被 vehicle_rows 截断，导致第二阶段校验报
+        # 「row_count 与 row_ids 数量不一致」而直接失败。
+        "row_ids": [
+            {
+                "source_id": row["source_id"],
+                "source_file_sha256": row["source_id"].split(":", 2)[1],
+                "source_sheet": row.get("source_sheet", ""),
+                "source_row": row.get("source_row", ""),
+                "company": row.get("company"),
+                "dispatch_no": row.get("dispatch_no"),
+                "execution_date": row.get("seal_time"),
+                "route": row.get("route"),
+                "plate": row.get("plate"),
+                "trailer": row.get("trailer"),
+                "settlement_tonnage": row.get("settlement_tonnage"),
+            }
+            for row in review_rows
+        ],
+        "metrics": {
+            "model_rows": len(model_summary_rows),
+            "online_rows": len(online_rows),
+            "online_matched": model_matched,
+            "vehicle_matched": model_matched,
+            "price_matched": price_matched,
+            "model_summary_candidates": len(online_rows),
+            "model_summary_unique_keys": len(model_summary_rows),
+            "model_summary_nonzero_selections": nonzero_selections,
+            "model_summary_all_zero": len(model_summary_rows) - nonzero_selections,
+            "formula_volume_recalculated": formula_recalculated,
+            "authoritative_vehicle_rows": count,
+            "official_comparison": comparison_stats,
+            "model_summary_matched": model_matched,
+            "model_summary_unmatched": count - model_matched,
+            "price_unmatched": count - price_matched,
+            "downgrade_count": sum(bool(row.get("downgraded")) for row in review_rows),
+            "problem_count": problem_count,
+        },
+        "issue_counts": dict(issue_counter),
+        "warnings": warnings,
+    })
+    _save_state(state_path, state)
+    return model_summary_output, output
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="生成月度基础报表初版并进入人工复核闸门")
+    parser.add_argument("--input-dir", required=True, type=Path)
+    parser.add_argument("--workspace-dir", required=True, type=Path)
+    parser.add_argument("--month", help="目标月份 YYYY-MM")
+    parser.add_argument("--force", action="store_true", help="重新生成已有初版；会覆盖尚未提交的人工修改")
+    args = parser.parse_args(argv)
+    try:
+        model_summary, review = build_review_workbook(
+            args.input_dir, args.workspace_dir, args.month, force=args.force
+        )
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    state = json.loads((args.workspace_dir / "run-state.json").read_text(encoding="utf-8"))
+    print(json.dumps({
+        "ok": True,
+        "phase": state["phase"],
+        "outputs": [str(model_summary), str(review)],
+        "metrics": state.get("metrics"),
+        "issues": state.get("issue_counts"),
+        "warnings": state.get("warnings"),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

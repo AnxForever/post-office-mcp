@@ -188,6 +188,12 @@ def write_review_workbook(
     issues_ws.auto_filter.ref = issues_ws.dimensions
 
     data_start_row = int(layout["data_start_row"])
+    # 模板示例行里可能留有合并单元格（如 O4:O5 运价、P4:P5 标准价），
+    # 删除示例行后合并区仍在，会把数据行对应列变成 MergedCell，写进去的值
+    # 在保存后丢失。写数据前先拆掉落在数据区的合并。
+    for merged in list(base_ws.merged_cells.ranges):
+        if merged.max_row >= data_start_row:
+            base_ws.unmerge_cells(str(merged))
     trailer_column = int(layout["headers"]["车牌号"]) + 1
     layout_columns = {int(column) for column in layout["headers"].values()} | {trailer_column}
     layout_min_column = min(layout_columns)
