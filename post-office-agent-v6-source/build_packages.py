@@ -80,18 +80,51 @@ def build_agent_zip(payload: dict[str, object]) -> None:
         add_bytes(archive, "prompt.md", prompt)
 
 
+def agent_skill_names() -> list[str]:
+    """agent.yaml 里 skills: 段绑定的技能名，按文件里的顺序取；缺目录的直接报错。"""
+    skills: list[str] = []
+    inside = False
+    for line in (AGENT_ROOT / "agent.yaml").read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("skills:"):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if stripped.startswith("- "):
+            skills.append(stripped[2:].strip().strip('"').strip("'"))
+        elif stripped:
+            break
+    missing = [n for n in skills if not (ROOT / "skill" / n).is_dir()]
+    if missing:
+        raise ValueError(f"agent.yaml 绑定的技能目录不存在: {', '.join(missing)}")
+    return skills
+
+
 def build_agentos_zip(files: list[Path]) -> None:
     """生成 AgentOS「导入专家」对话框可直接接受的包。
 
     平台只认 agent/agent.yaml 结构；技能必须放在 agent/skills/<name>/ 下，
     否则导入后任务启动会报「绑定技能未安装」。agent.json 导出格式不适用于导入。
+    绑几个技能就装几个，漏装的那个启动时同样会报未安装。
     """
     with zipfile.ZipFile(AGENTOS_ZIP, "w") as archive:
         add_bytes(archive, "agent/agent.yaml", (AGENT_ROOT / "agent.yaml").read_bytes())
         add_bytes(archive, "agent/prompt.md", (AGENT_ROOT / "prompt.md").read_bytes())
-        for path in files:
-            relative = path.relative_to(SKILL_ROOT).as_posix()
-            add_bytes(archive, f"agent/skills/{SKILL_NAME}/{relative}", path.read_bytes())
+        for skill in agent_skill_names():
+            if skill == SKILL_NAME:
+                embedded, root = files, SKILL_ROOT
+            else:
+                root = ROOT / "skill" / skill
+                embedded = sorted(
+                    path for path in root.rglob("*")
+                    if path.is_file()
+                    and "__pycache__" not in path.parts
+                    and path.suffix != ".pyc"
+                )
+            for path in embedded:
+                relative = path.relative_to(root).as_posix()
+                add_bytes(archive, f"agent/skills/{skill}/{relative}", path.read_bytes())
 
 
 def main() -> None:
