@@ -237,7 +237,23 @@ def _read_summary_sheets(base_path: Path) -> tuple[dict, dict, dict]:
             if sheet not in workbook.sheetnames:
                 diag[sheet] = {"status": "missing"}
                 continue
-            rows = list(workbook[sheet].iter_rows(values_only=True))
+            sheet_ws = workbook[sheet]
+            rows = list(sheet_ws.iter_rows(values_only=True))
+            # 邮政系统导出的工作簿可能带写坏的 <dimension ref="A1"/>，read_only 会
+            # 把它当成只有一格，表头读出来只有一个「账」。这种才丢掉维度缓存重读；
+            # 正常表不能重读——重读后的行会按实际单元格截断，长度参差不齐。
+            if rows and sum(1 for v in rows[0] if str(v or "").strip()) <= 1:
+                try:
+                    sheet_ws.reset_dimensions()
+                except Exception:
+                    pass
+                else:
+                    rows = list(sheet_ws.iter_rows(values_only=True))
+            width = len(rows[0]) if rows else 0
+            rows = [
+                row if len(row) >= width else tuple(row) + (None,) * (width - len(row))
+                for row in rows
+            ]
             if not rows:
                 diag[sheet] = {"status": "empty"}
                 continue
@@ -1438,10 +1454,11 @@ def main(argv=None) -> int:
             "detail_rows": len(trips),
             "income_match": stats,
             "status": "finance_mismatch",
-            "message": f"财务收入表 {len(misses)}/{len(trips)} 条派车记录配不上（车牌+日期），"
-                       "两份文件很可能不是同一个月的",
+            "message": f"财务收入表「{Path(args.finance).name}」有 {len(misses)}/{len(trips)} 条派车记录"
+                       "配不上（车牌+日期），和基础报表原版不是同一个月的",
             "next_action": "请确认财务收入表（运输局）和基础报表原版是同月的；"
-                           "财务表通常是次月结算，但业务日期要覆盖当月。",
+                           "财务表通常是次月结算，但业务日期要覆盖当月。"
+                           "工作目录里如果还留着别的月份的运输局表，请先删掉再重跑。",
         }, ensure_ascii=False, indent=2))
         return 2
     trip_income, unused_income_raw = _trip_level_income(trips, exact, by_plate, year)

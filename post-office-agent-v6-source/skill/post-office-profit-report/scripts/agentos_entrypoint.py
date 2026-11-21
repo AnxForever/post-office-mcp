@@ -13,15 +13,30 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# 独立运行时不依赖调用方设置 sys.path：把本脚本目录放到最前面，
+# 保证 reconciliation / build_* 等本地模块优先从本技能包导入。
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if not (_SCRIPTS_DIR / "build_profit_tables.py").is_file():
+    # 平台脚本执行器可能把入口文件暂存到别的目录；按技能名回到真实技能包。
+    for _base in (Path("/workspace/skills"), Path("/workspace")):
+        _candidate = _base / "post-office-profit-report" / "scripts"
+        if (_candidate / "build_profit_tables.py").is_file():
+            _SCRIPTS_DIR = _candidate
+            break
+_SCRIPTS_DIR = str(_SCRIPTS_DIR)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
 
 import argparse
 import json
 import re
 import runpy
-import sys
 from collections import Counter
-from pathlib import Path
 
 import openpyxl
 
@@ -30,6 +45,8 @@ from paths import resolve_input_dir
 BASE_SHEETS = ("一干汇总", "二干基础")
 FINANCE_HEADERS = ("结算收入", "普服收入")
 DATE_HEADERS = ("封车时间", "邮路执行日期", "邮路执行时间")
+# 文件名里出现这些字样的，通常是客户上传的财务收入表（运输局导出）。
+FINANCE_NAME_HINTS = ("运输局", "财务", "收入")
 
 
 def _excel_files(root: Path) -> list[Path]:
@@ -49,6 +66,109 @@ def _first_header(ws) -> list[str]:
     return []
 
 
+def _sheet_header(ws) -> list[str]:
+    """读第一行表头；只读到一格时丢掉工作簿里写坏的维度缓存再读一次。
+
+    客户从邮政系统导出的运输局表常带 `<dimension ref="A1"/>`，
+    read_only 模式信任这个标签，只吐出 A1 一个格子（表头变成 ['账']），
+    于是财务收入表被当成认不出来的文件跳过。2026-11 线上 7/8 月两次失败都是这个原因。
+    """
+    header = _first_header(ws)
+    if sum(1 for value in header if value) > 1:
+        return header
+    try:
+        ws.reset_dimensions()
+    except Exception:  # 非 read_only 工作表的 reset_dimensions 是空实现，失败也不影响
+        return header
+    return _first_header(ws)
+
+
+def _column_index(header: list[str], *names: str) -> int | None:
+    for i, value in enumerate(header):
+        if value in names:
+            return i
+    return None
+
+
+def _numbers_by_column(ws, index: int, limit: int = 4000) -> list[str]:
+    """扫一列文本值，用来判断财务收入表属于哪个月（流水号前 4 位是 MMDD）。"""
+    values: list[str] = []
+    for row in ws.iter_rows(min_row=2, min_col=index + 1, max_col=index + 1, values_only=True):
+        values.append(str((row or [""])[0] or "").strip())
+        if len(values) >= limit:
+            break
+    return values
+
+
+def probe_finance_month(path: Path) -> dict:
+    """从财务收入表的流水号（MMDD）推断它覆盖的月份，用于和基础报表对月。
+
+    只读流水号一列，不解压整张表；认不出来就返回 {"month": None}，不拦截。
+    """
+    try:
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    except Exception as exc:
+        return {"file": path.name, "month": None, "error": str(exc)}
+    try:
+        sheet = workbook[workbook.sheetnames[0]]
+        header = _sheet_header(sheet)
+        index = _column_index(header, "流水号")
+        if index is None:
+            return {"file": path.name, "month": None}
+        counter: Counter[str] = Counter()
+        for value in _numbers_by_column(sheet, index):
+            if len(value) >= 4 and value[:4].isdigit():
+                counter[value[:2]] += 1
+        if not counter:
+            return {"file": path.name, "month": None}
+        mmdd, count = counter.most_common(1)[0]
+        if int(mmdd) < 1 or int(mmdd) > 12 or count < 10:
+            return {"file": path.name, "month": None, "samples": dict(counter.most_common(4))}
+        return {
+            "file": path.name,
+            "month": int(mmdd),
+            "rows": count,
+            "samples": dict(counter.most_common(4)),
+        }
+    finally:
+        workbook.close()
+
+
+def _pick_base(candidates: list[Path], month: str | None) -> Path:
+    """多份基础报表时挑一份：优先业务日期就是目标月份的，其次最近上传的。"""
+    if len(candidates) == 1:
+        return candidates[0]
+    if month:
+        wanted = str(month)
+        for path in candidates:
+            if infer_month(path).get("month") == wanted:
+                return path
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _pick_finance(candidates: list[Path], month: str, probes: list[dict]) -> Path | None:
+    """多份财务收入表时按流水号月份挑；没有一张对得上就返回 None，绝不随便顶替。"""
+    try:
+        target = int(str(month).split("-")[1])
+    except (IndexError, ValueError):
+        target = None
+    ordered = sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in ordered:
+        probes.append(probe_finance_month(path))
+    if target is None:
+        return ordered[0] if ordered else None
+    matches = [p for p in probes if p.get("month") == target]
+    if matches:
+        wanted = {p["file"] for p in matches}
+        return next(path for path in ordered if path.name in wanted)
+    # 月份读不出来（缺流水号列等）的表不能一票否决，交给出表前的对账闸门兜底。
+    unknown = [p for p in probes if p.get("month") is None]
+    if unknown:
+        wanted = {p["file"] for p in unknown}
+        return next(path for path in ordered if path.name in wanted)
+    return None
+
+
 def identify(path: Path) -> tuple[str | None, dict]:
     """按表结构判断这个工作簿是 base（基础报表原版）还是 finance（财务收入表）。"""
     try:
@@ -60,7 +180,7 @@ def identify(path: Path) -> tuple[str | None, dict]:
         if all(sheet in names for sheet in BASE_SHEETS):
             return "base_report", {"file": path.name, "sheets": list(names)[:8]}
         sheet = workbook[workbook.sheetnames[0]]
-        header = _first_header(sheet)
+        header = _sheet_header(sheet)
         if all(any(h == name for h in header) for name in FINANCE_HEADERS):
             return "finance", {"file": path.name, "headers": header[:12]}
         return None, {"file": path.name, "headers": header[:12]}
@@ -80,8 +200,18 @@ def infer_month(base_path: Path) -> dict:
             for sheet_name in BASE_SHEETS:
                 if sheet_name not in workbook.sheetnames:
                     continue
-                rows = workbook[sheet_name].iter_rows(values_only=True)
-                header = [str(v or "").strip() for v in next(rows)]
+                sheet = workbook[sheet_name]
+                rows = sheet.iter_rows(values_only=True)
+                header = [str(v or "").strip() for v in next(rows, ())]
+                # 写坏的 <dimension ref="A1"/> 会让表头只读出一格，丢掉维度缓存再读。
+                if sum(1 for value in header if value) <= 1:
+                    try:
+                        sheet.reset_dimensions()
+                    except Exception:
+                        pass
+                    else:
+                        rows = sheet.iter_rows(values_only=True)
+                        header = [str(v or "").strip() for v in next(rows, ())]
                 col = next((i for i, name in enumerate(header) if name in DATE_HEADERS), None)
                 if col is None:
                     continue
@@ -143,26 +273,35 @@ def main(argv=None) -> int:
 
     base_file, finance_file = args.base_file, args.finance_file
     detected: list[dict] = []
+    base_candidates: list[Path] = []
+    finance_candidates: list[Path] = []
+    unrecognized: list[Path] = []
     if not base_file or not finance_file:
         for path in _excel_files(input_dir):
             role, info = identify(path)
             detected.append({"role": role, **info})
-            if role == "base_report" and not base_file:
-                base_file = path
-            elif role == "finance" and not finance_file:
-                finance_file = path
+            if role == "base_report":
+                base_candidates.append(path)
+            elif role == "finance":
+                finance_candidates.append(path)
+            elif any(hint in path.name for hint in FINANCE_NAME_HINTS):
+                unrecognized.append(path)
+
+    if not base_file and base_candidates:
+        base_file = _pick_base(base_candidates, args.month)
 
     missing = []
     if not base_file:
         missing.append({"role": "base_report", "label": "基础报表原版",
                         "action": "请上传基础报表原版（含「一干汇总」和「二干基础」两个工作表）"})
-    if not finance_file:
+    if not finance_file and not finance_candidates:
         missing.append({"role": "finance", "label": "财务收入表",
                         "action": "请上传财务收入表（表头要有「结算收入」和「普服收入」）"})
     if missing:
         print(json.dumps({
             "ok": True, "status": "needs_input", "phase": "awaiting_inputs",
             "input_dir": str(input_dir), "detected": detected,
+            "unrecognized_files": [path.name for path in unrecognized],
             "missing_inputs": missing,
             "message": "当前上传的文件不完整，需要补充：" + "、".join(m["label"] for m in missing) + "。",
             "next_action": "请补充后重试。",
@@ -180,6 +319,29 @@ def main(argv=None) -> int:
             }, ensure_ascii=False, indent=2))
             return 0
         month = inference["month"]
+
+    # 基础报表的月份定下来之后再挑财务表：输入目录里往往还留着别的月份的运输局表，
+    # 只按文件名先后取第一张，会拿上个月的表硬配当月的基础报表，
+    # 最后在出表闸门报「两条数据对不上」，把文件选错说成数据问题。
+    finance_probes: list[dict] = []
+    if not finance_file and finance_candidates:
+        finance_file = _pick_finance(finance_candidates, month, finance_probes)
+        if finance_file is None:
+            print(json.dumps({
+                "ok": False, "status": "finance_month_mismatch", "phase": "needs_input",
+                "month": month,
+                "base_file": Path(base_file).name,
+                "finance_candidates": finance_probes,
+                "unrecognized_files": [path.name for path in unrecognized],
+                "message": f"输入目录里的财务收入表没有一张是 {month} 的，"
+                           f"和基础报表原版「{Path(base_file).name}」对不上月份。",
+                "next_action": f"请上传 {month} 的运输局（财务收入）表；"
+                               "目录里其他月份的表不会被拿来顶替。",
+            }, ensure_ascii=False, indent=2))
+            return 2
+        chosen = next((p for p in finance_probes if p["file"] == Path(finance_file).name), None)
+        if chosen and chosen.get("month"):
+            print(f"[OK] 财务收入表: {Path(finance_file).name}（流水号月份 {chosen['month']:02d}）")
 
     output_dir = args.out or (args.workspace / "output")
     try:

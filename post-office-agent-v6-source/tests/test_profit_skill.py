@@ -20,6 +20,7 @@ import openpyxl
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPTS = PACKAGE / "skill" / "post-office-profit-report" / "scripts"
 BUILD = SCRIPTS / "build_profit_tables.py"
+ENTRY = SCRIPTS / "agentos_entrypoint.py"
 
 # 一干：容间 -> 应该在的表头档位（含区间边界和 180 整的归属）
 VOLUME_CASES = [
@@ -202,6 +203,17 @@ def make_dropped_base(path: Path) -> None:
 def run(base: Path, finance: Path, out: Path) -> dict:
     command = [sys.executable, str(BUILD), "--base", str(base), "--finance", str(finance),
                "--month", "2026-09", "--out", str(out)]
+    return _execute(command)
+
+
+def run_entrypoint(workspace: Path, out: Path) -> dict:
+    """只给目录，让入口自己认文件、自己挑同月的财务收入表。"""
+    command = [sys.executable, str(ENTRY), "--phase", "profit",
+               "--workspace", str(workspace), "--out", str(out)]
+    return _execute(command)
+
+
+def _execute(command: list[str]) -> dict:
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                             errors="replace", cwd=str(SCRIPTS))
     payload = None
@@ -358,6 +370,97 @@ def check_totals(out: Path) -> list[str]:
     return problems
 
 
+def break_dimension(path: Path) -> None:
+    """把工作表的 <dimension> 改成 <dimension ref="A1"/>，模拟邮政系统导出的坏表。"""
+    import re
+    import shutil
+    import zipfile
+
+    temp = path.with_suffix(".tmp.xlsx")
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.startswith("xl/worksheets/") and item.filename.endswith(".xml"):
+                text = data.decode("utf-8")
+                text = re.sub(r'<dimension ref="[^"]*"\s*/>', '<dimension ref="A1"/>', text, count=1)
+                data = text.encode("utf-8")
+            target.writestr(item, data)
+    shutil.move(str(temp), str(path))
+
+
+def make_finance_for_month(path: Path, month_prefix: str) -> None:
+    """造一张指定月份（流水号 MMDD）的财务收入表，能配上 make_base。"""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["邮路级别", "自委办", "结算收入", "普服收入", "邮路名称", "车牌号", "流水号"])
+    for index in range(1, len(VOLUME_CASES) + 1):
+        sheet.append(["一干", "委办", 950.0 * index, 0,
+                      f"西安-测试{index}", f"陕A{index:04d}", f"{month_prefix}10"])
+    for offset in range(1, REROUTE_COUNT + 1):
+        sheet.append(["二干", "委办", 7000.0 + offset, 0,
+                      f"西安-改判{offset}", f"陕B{offset:04d}", f"{month_prefix}10"])
+    for index in range(1, len(TONNAGE_CASES) + 1):
+        sheet.append(["二干", "委办", 1500.0 * index, 0,
+                      f"西安-二干{index}", f"陕C{index:04d}", f"{month_prefix}10"])
+    sheet.append(["二干", "委办", 2000, 0, "西安-陇南", CONFIRMED_PLATE, f"{month_prefix}08"])
+    sheet.append(["二干", "委办", 2000, 0, "西安-陇南", CONFIRMED_PLATE, f"{month_prefix}10"])
+    sheet.append(["二干", "委办", ORPHAN_INCOME, 0, "西安-孤儿", ORPHAN_PLATE, f"{month_prefix}10"])
+    sheet.append(["二干", "委办", UNUSED_INCOME, 0, "西安-二干1", UNUSED_PLATE, f"{month_prefix}25"])
+    workbook.save(path)
+    workbook.close()
+
+
+def check_finance_picking(root: Path) -> list[str]:
+    """入口自己认文件、挑同月财务表。
+
+    1. 客户导出的财务表 <dimension> 写坏成 A1，仍要认得出；
+    2. 目录里同时有别的月份的运输局表时，不能拿它顶替；
+    3. 只有别的月份的表时，要停下来报「月份对不上」，不能硬配。
+    """
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="profit-pick-", dir=str(root)) as tmp:
+        work = Path(tmp)
+
+        correct = work / "2026.09运输局.xlsx"
+        make_finance_for_month(correct, "09")
+        break_dimension(correct)
+        wrong_month = work / "2026.08运输局.xlsx"
+        make_finance_for_month(wrong_month, "08")
+        # 文件名排在前面的是别的月份，旧逻辑会先挑到它。
+        (work / "2026.08运输局.xlsx").rename(work / "0_2026.08运输局.xlsx")
+        base = work / "基础报表原版.xlsx"
+        make_base(base)
+
+        picked = run_entrypoint(work, work / "out1")
+        if picked["code"] != 0:
+            problems.append(f"目录里同时有 8/9 月财务表时退出码 {picked['code']}，应为 0")
+        elif (picked["report"] or {}).get("status") != "profit_completed":
+            problems.append(f"目录里同时有 8/9 月财务表时没有出表："
+                            f"{(picked['report'] or {}).get('status')}")
+        else:
+            if "2026.09运输局.xlsx" not in (picked["stdout"] or ""):
+                problems.append("目录里同时有 8/9 月财务表时，没有挑 9 月那张")
+            match = (picked["report"] or {}).get("income_match") or {}
+            # 造的数据里本来就有 1 条故意配不上的趟次，其余都要配上。
+            if match.get("miss", 0) > 1:
+                problems.append(f"挑错月份的表：{match.get('miss')} 条配不上收入")
+
+        # 只剩别的月份：必须停手报月份对不上，退出码 2。
+        only_wrong = work / "only_wrong"
+        only_wrong.mkdir()
+        (work / "0_2026.08运输局.xlsx").rename(only_wrong / "2026.08运输局.xlsx")
+        (only_wrong / "基础报表原版.xlsx").write_bytes(base.read_bytes())
+        refused = run_entrypoint(only_wrong, only_wrong / "out")
+        status = (refused["report"] or {}).get("status")
+        if status != "finance_month_mismatch":
+            problems.append(f"只有别月份财务表时返回 {status}，应为 finance_month_mismatch")
+        if refused["code"] != 2:
+            problems.append(f"月份对不上时退出码 {refused['code']}，应为 2")
+        if (only_wrong / "out").exists() and any((only_wrong / "out").glob("*.xlsx")):
+            problems.append("月份对不上时仍然出了表")
+    return problems
+
+
 def main() -> int:
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="profit-skill-") as tmp:
@@ -422,6 +525,8 @@ def main() -> int:
             failures.append(f"有行分不出车型时退出码 {result3['code']}，应为 2")
         elif (result3["report"] or {}).get("status") != "base_rows_dropped":
             failures.append("有行分不出车型时，没有返回 base_rows_dropped")
+
+        failures.extend(check_finance_picking(root))
 
     if failures:
         for item in failures:
