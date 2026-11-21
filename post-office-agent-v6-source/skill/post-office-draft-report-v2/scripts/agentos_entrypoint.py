@@ -13,15 +13,30 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# 独立运行时不依赖调用方设置 sys.path：把本脚本目录放到最前面，
+# 保证 reconciliation / build_* 等本地模块优先从本技能包导入。
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if not (_SCRIPTS_DIR / "build_review_workbook.py").is_file():
+    # 平台脚本执行器可能把入口文件暂存到别的目录；按技能名回到真实技能包。
+    for _base in (Path("/workspace/skills"), Path("/workspace")):
+        _candidate = _base / "post-office-draft-report-v2" / "scripts"
+        if (_candidate / "build_review_workbook.py").is_file():
+            _SCRIPTS_DIR = _candidate
+            break
+_SCRIPTS_DIR = str(_SCRIPTS_DIR)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
 
 import argparse
 import json
-import sys
 from collections import Counter
 from copy import copy
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook

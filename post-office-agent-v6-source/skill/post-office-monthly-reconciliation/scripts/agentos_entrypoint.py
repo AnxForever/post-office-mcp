@@ -1,4 +1,14 @@
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# 独立运行时不依赖调用方设置 sys.path：把本脚本目录放到最前面，
+# 保证 reconciliation / build_* 等本地模块优先从本技能包导入。
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 from reconciliation import xml_compat  # noqa: F401  必须在 openpyxl 之前导入
 from reconciliation.paths import SKIP_DIRS, resolve_input_dir
 
@@ -6,9 +16,7 @@ import argparse
 import json
 import os
 import runpy
-import sys
 from datetime import datetime
-from pathlib import Path
 
 
 def _resolve_skill_root(explicit: Path | str | None) -> Path:

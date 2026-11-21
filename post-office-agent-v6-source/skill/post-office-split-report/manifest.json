@@ -1,6 +1,6 @@
 {
   "name": "post-office-split-report",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "bound",
   "description": "邮局基础报表拆分专用技能：把人工核对后的 02 初版拆成路线页签（03），不依赖同一任务的运行状态",
   "scripts": {

@@ -96,7 +96,7 @@ def main() -> int:
 
         # 02 基础报表初版
         _, draft = run(
-            "post-office-draft-report",
+            "post-office-draft-report-v2",
             "--input-dir", str(APRIL),
             "--model-file", str(summary_file),
             "--month", "2026-04",
@@ -124,7 +124,7 @@ def main() -> int:
 
         # 已有 02 时不自动覆盖，避免把人工核对结果冲掉。
         _, draft_again = run(
-            "post-office-draft-report",
+            "post-office-draft-report-v2",
             "--input-dir", str(APRIL),
             "--model-file", str(summary_file),
             "--month", "2026-04",

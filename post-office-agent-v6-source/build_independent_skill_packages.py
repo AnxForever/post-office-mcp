@@ -5,7 +5,7 @@
 
 产物落在仓库上一级目录（和原来的 *-skill.zip 放一起）：
     post-office-model-summary-skill.zip
-    post-office-draft-report-skill.zip
+    post-office-draft-report-v2-skill.zip
     post-office-split-report-skill.zip
     post-office-profit-report-skill.zip
 
@@ -25,7 +25,7 @@ FIXED_ZIP_TIME = (2026, 7, 28, 0, 0, 0)
 
 SKILLS = (
     "post-office-model-summary",
-    "post-office-draft-report",
+    "post-office-draft-report-v2",
     "post-office-split-report",
     "post-office-profit-report",
 )

@@ -3,8 +3,11 @@ description: "按表结构识别输入文件，通过受控 Skill 执行月度�
 version: "6.7.0"
 type: "general"
 skills:
-  - "post-office-monthly-reconciliation"
+  - "post-office-model-summary"
+  - "post-office-draft-report-v2"
+  - "post-office-split-report"
   - "post-office-profit-report"
+  - "post-office-monthly-reconciliation"
 toolWhitelist:
   - "code.execute"
 prompt: "prompt.md"

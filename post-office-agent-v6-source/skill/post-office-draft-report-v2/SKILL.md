@@ -1,5 +1,5 @@
 ---
-name: post-office-draft-report
+name: post-office-draft-report-v2
 description: 邮局基础报表初版专用技能。用上一阶段的车型汇总表（01）+ 6 家车管派车记录 + 一干/二干价格表，生成 21 列基础报表初版（02），带问题汇总和拆分元数据。用户提到基础报表初版、02 表、初版核对时使用。
 ---
 

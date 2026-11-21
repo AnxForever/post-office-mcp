@@ -1,6 +1,6 @@
 {
   "name": "post-office-model-summary",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "bound",
   "description": "邮局车型汇总表专用技能：只上传草滩和港务两张在线测量表，合并成当月的车型汇总表",
   "scripts": {
